@@ -1,0 +1,292 @@
+use crate::{error::AppError, services::AuthService, state::AppState};
+use axum::{
+    extract::State,
+    http::{HeaderMap, StatusCode, Request},
+    middleware::Next,
+    response::Response,
+    body::Body,
+};
+use governor::{
+    clock::DefaultClock,
+    state::{InMemoryState, NotKeyed, keyed::DashMapStateStore},
+    Quota, RateLimiter,
+};
+use std::{
+    net::SocketAddr,
+    num::NonZeroU32,
+    sync::Arc,
+    time::Duration,
+};
+use tracing::{debug, warn, info};
+use tokio::sync::OnceCell;
+
+type KeyedRateLimiter = RateLimiter<String, DashMapStateStore<String>, DefaultClock>;
+static RATE_LIMITER: OnceCell<KeyedRateLimiter> = OnceCell::const_new();
+
+/// 认证中间件
+pub async fn auth_middleware(
+    State(app_state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    mut request: Request<Body>,
+    next: Next<Body>,
+) -> Result<Response, AppError> {
+    // 检查是否有 Authorization 头
+    if let Some(auth_header) = headers.get("authorization") {
+        if let Ok(auth_str) = auth_header.to_str() {
+            if auth_str.starts_with("Bearer ") {
+                let token = &auth_str[7..];
+                
+                // 验证 JWT
+                match app_state.auth_service.verify_jwt(token) {
+                    Ok(claims) => {
+                        // 尝试获取用户信息
+                        match app_state.auth_service.get_user_from_rainbow_auth(&claims.sub, token).await {
+                            Ok(user) => {
+                                debug!("Authenticated user: {} ({})", user.id, user.email);
+                                // 将用户信息添加到请求中
+                                request.extensions_mut().insert(user);
+                            }
+                            Err(e) => {
+                                warn!("Failed to get user from Rainbow-Auth: {}", e);
+                                // 不返回错误，让请求继续处理（作为未认证请求）
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        debug!("JWT verification failed: {}", e);
+                        // 不返回错误，让请求继续处理（作为未认证请求）
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(next.run(request).await)
+}
+
+/// 速率限制中间件
+pub async fn rate_limit_middleware(
+    State(app_state): State<Arc<AppState>>,
+    mut request: Request<Body>,
+    next: Next<Body>,
+) -> Result<Response, AppError> {
+    // 获取或创建速率限制器
+    let rate_limiter = RATE_LIMITER.get_or_init(|| async {
+        let quota = Quota::per_minute(NonZeroU32::new(app_state.config.rate_limit_requests).unwrap())
+            .allow_burst(NonZeroU32::new(10).unwrap());
+        RateLimiter::dashmap(quota)
+    }).await;
+
+    // 获取客户端 IP
+    let client_ip = get_client_ip(&request);
+    
+    // 检查速率限制
+    match rate_limiter.check_key(&client_ip) {
+        Ok(_) => {
+            debug!("Rate limit check passed for IP: {}", client_ip);
+            Ok(next.run(request).await)
+        }
+        Err(_) => {
+            warn!("Rate limit exceeded for IP: {}", client_ip);
+            Err(AppError::RateLimitExceeded)
+        }
+    }
+}
+
+/// 请求日志中间件
+pub async fn request_logging_middleware(
+    request: Request<Body>,
+    next: Next<Body>,
+) -> Response {
+    let method = request.method().clone();
+    let uri = request.uri().clone();
+    let client_ip = get_client_ip(&request);
+    
+    let start_time = std::time::Instant::now();
+    
+    debug!("Incoming request: {} {} from {}", method, uri, client_ip);
+    
+    let response = next.run(request).await;
+    
+    let elapsed = start_time.elapsed();
+    let status = response.status();
+    
+    info!(
+        "Request completed: {} {} {} - {}ms",
+        method,
+        uri,
+        status.as_u16(),
+        elapsed.as_millis()
+    );
+    
+    response
+}
+
+/// CORS 中间件（如果需要自定义逻辑）
+pub async fn cors_middleware(
+    request: Request<Body>,
+    next: Next<Body>,
+) -> Response {
+    let origin = request
+        .headers()
+        .get("origin")
+        .and_then(|h| h.to_str().ok())
+        .unwrap_or("*")
+        .to_string();
+    
+    let mut response = next.run(request).await;
+    
+    // 添加 CORS 头
+    let headers = response.headers_mut();
+    headers.insert("access-control-allow-origin", origin.parse().unwrap());
+    headers.insert("access-control-allow-methods", "GET, POST, PUT, DELETE, OPTIONS".parse().unwrap());
+    headers.insert("access-control-allow-headers", "content-type, authorization".parse().unwrap());
+    headers.insert("access-control-max-age", "3600".parse().unwrap());
+    
+    response
+}
+
+/// 安全头中间件
+pub async fn security_headers_middleware(
+    request: Request<Body>,
+    next: Next<Body>,
+) -> Response {
+    let is_https = is_https_request(&request);
+    let mut response = next.run(request).await;
+    
+    let headers = response.headers_mut();
+    
+    // 安全相关头
+    headers.insert("x-content-type-options", "nosniff".parse().unwrap());
+    headers.insert("x-frame-options", "DENY".parse().unwrap());
+    headers.insert("x-xss-protection", "1; mode=block".parse().unwrap());
+    headers.insert("referrer-policy", "strict-origin-when-cross-origin".parse().unwrap());
+    
+    // 如果是 HTTPS 环境，添加 HSTS
+    if is_https {
+        headers.insert("strict-transport-security", "max-age=31536000; includeSubDomains".parse().unwrap());
+    }
+    
+    response
+}
+
+/// 内容压缩中间件（已在 main.rs 中使用 tower-http 的 CompressionLayer）
+
+/// 请求 ID 中间件
+pub async fn request_id_middleware(
+    mut request: Request<Body>,
+    next: Next<Body>,
+) -> Response {
+    let request_id = uuid::Uuid::new_v4().to_string();
+    
+    // 添加到请求扩展中
+    request.extensions_mut().insert(RequestId(request_id.clone()));
+    
+    let mut response = next.run(request).await;
+    
+    // 添加到响应头中
+    response.headers_mut().insert("x-request-id", request_id.parse().unwrap());
+    
+    response
+}
+
+/// 健康检查绕过中间件
+pub async fn health_check_bypass_middleware(
+    request: Request<Body>,
+    next: Next<Body>,
+) -> Response {
+    // 健康检查端点绕过某些中间件
+    if request.uri().path() == "/health" || request.uri().path() == "/" {
+        return next.run(request).await;
+    }
+    
+    next.run(request).await
+}
+
+// 辅助函数
+
+/// 获取客户端 IP 地址
+fn get_client_ip(request: &Request<Body>) -> String {
+    // 尝试从各种头中获取真实 IP
+    let headers = request.headers();
+    
+    // 检查常见的代理头
+    if let Some(forwarded_for) = headers.get("x-forwarded-for") {
+        if let Ok(ip_str) = forwarded_for.to_str() {
+            if let Some(ip) = ip_str.split(',').next() {
+                return ip.trim().to_string();
+            }
+        }
+    }
+    
+    if let Some(real_ip) = headers.get("x-real-ip") {
+        if let Ok(ip_str) = real_ip.to_str() {
+            return ip_str.to_string();
+        }
+    }
+    
+    if let Some(forwarded) = headers.get("forwarded") {
+        if let Ok(forwarded_str) = forwarded.to_str() {
+            // 解析 Forwarded 头（简化版本）
+            for part in forwarded_str.split(';') {
+                if part.trim().starts_with("for=") {
+                    let ip = part.trim().strip_prefix("for=").unwrap_or("");
+                    return ip.trim_matches('"').to_string();
+                }
+            }
+        }
+    }
+    
+    // 如果都没有，使用连接信息（在实际部署中可能不可用）
+    request
+        .extensions()
+        .get::<SocketAddr>()
+        .map(|addr| addr.ip().to_string())
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+/// 检查请求是否为 HTTPS
+fn is_https_request(request: &Request<Body>) -> bool {
+    // 检查协议
+    if request.uri().scheme_str() == Some("https") {
+        return true;
+    }
+    
+    // 检查代理头
+    if let Some(proto) = request.headers().get("x-forwarded-proto") {
+        if let Ok(proto_str) = proto.to_str() {
+            return proto_str == "https";
+        }
+    }
+    
+    if let Some(https) = request.headers().get("x-forwarded-ssl") {
+        if let Ok(https_str) = https.to_str() {
+            return https_str == "on";
+        }
+    }
+    
+    false
+}
+
+// 类型定义
+
+/// 请求 ID 包装器
+#[derive(Debug, Clone)]
+pub struct RequestId(pub String);
+
+/// 速率限制配置
+#[derive(Debug, Clone)]
+pub struct RateLimitConfig {
+    pub requests_per_minute: u32,
+    pub burst_size: u32,
+}
+
+impl Default for RateLimitConfig {
+    fn default() -> Self {
+        Self {
+            requests_per_minute: 60,
+            burst_size: 10,
+        }
+    }
+}
+
