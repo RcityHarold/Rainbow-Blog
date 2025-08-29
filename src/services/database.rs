@@ -6,6 +6,7 @@ use std::fmt::Debug;
 use soulcore::prelude::*;
 use soulcore::engines::storage::StorageEngine;
 use surrealdb::Response;
+use surrealdb::sql::Thing;
 use tracing::{info, error, debug};
 
 /// 数据库服务
@@ -123,6 +124,42 @@ impl Database {
             .await
             .map_err(|e| AppError::from(e))?;
         Ok(())
+    }
+
+    /// 通过ID删除记录
+    pub async fn delete_by_id(&self, table: &str, id: &str) -> Result<()> {
+        let thing = Thing::from((table, id));
+        self.delete(thing).await
+    }
+
+    /// 通过ID获取单个记录
+    pub async fn get_by_id<T>(&self, table: &str, id: &str) -> Result<Option<T>>
+    where
+        T: for<'de> Deserialize<'de> + Send + Sync + Debug,
+    {
+        let resource = format!("{}:{}", table, id);
+        let results: Vec<T> = self.select(&resource).await?;
+        Ok(results.into_iter().next())
+    }
+
+    /// 通过ID更新记录
+    pub async fn update_by_id<T>(&self, table: &str, id: &str, data: T) -> Result<Option<T>>
+    where
+        T: Serialize + for<'de> Deserialize<'de> + Send + Sync + Debug,
+    {
+        let thing = Thing::from((table, id));
+        self.update(thing, data).await
+    }
+
+    /// 通过ID使用JSON数据更新记录并返回指定类型
+    pub async fn update_by_id_with_json<T>(&self, table: &str, id: &str, updates: serde_json::Value) -> Result<Option<T>>
+    where
+        T: for<'de> Deserialize<'de> + Send + Sync + Debug,
+    {
+        let query = format!("UPDATE {}:{} MERGE $updates RETURN *", table, id);
+        let mut response = self.query_with_params(&query, json!({"updates": updates})).await?;
+        let results: Vec<T> = response.take(0)?;
+        Ok(results.into_iter().next())
     }
 
     /// 查找单个记录

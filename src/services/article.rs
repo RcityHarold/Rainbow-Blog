@@ -828,4 +828,115 @@ impl ArticleService {
 
         Ok(count)
     }
+
+    /// 为文章添加点赞
+    pub async fn clap_article(&self, article_id: &str, user_id: &str, count: i32) -> Result<crate::models::clap::ClapResponse> {
+        debug!("User {} clapping article {} with count {}", user_id, article_id, count);
+
+        // 验证文章存在且已发布
+        let article = self.get_article_by_id(article_id).await?
+            .ok_or_else(|| AppError::NotFound("Article not found".to_string()))?;
+
+        if article.status != ArticleStatus::Published {
+            return Err(AppError::forbidden("Cannot clap unpublished articles"));
+        }
+
+        // 获取用户现有的点赞
+        let mut response = self.db
+            .query_with_params(r#"
+                SELECT * FROM clap 
+                WHERE user_id = $user_id 
+                AND article_id = $article_id
+            "#, json!({
+                "user_id": user_id,
+                "article_id": article_id
+            }))
+            .await?;
+        let claps: Vec<crate::models::clap::Clap> = response.take(0)?;
+        let existing_clap = claps.into_iter().next();
+
+        let user_clap_count = if let Some(mut clap) = existing_clap {
+            // 检查总数是否超过50
+            let new_total = clap.count + count;
+            if new_total > 50 {
+                return Err(AppError::BadRequest(
+                    format!("Maximum claps per article is 50. You have {} claps already.", clap.count)
+                ));
+            }
+
+            // 更新现有点赞
+            clap.count = new_total;
+            clap.updated_at = Utc::now();
+
+            let thing = Thing {
+                tb: "clap".to_string(),
+                id: surrealdb::sql::Id::String(clap.id.clone()),
+            };
+            let updated: crate::models::clap::Clap = self.db.update(thing, clap).await?
+                .ok_or_else(|| AppError::internal("Failed to update clap"))?;
+
+            updated.count
+        } else {
+            // 创建新点赞
+            if count > 50 {
+                return Err(AppError::BadRequest("Maximum claps per article is 50".to_string()));
+            }
+
+            let new_clap = crate::models::clap::Clap {
+                id: Uuid::new_v4().to_string(),
+                user_id: user_id.to_string(),
+                article_id: article_id.to_string(),
+                count,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            };
+
+            let created: crate::models::clap::Clap = self.db.create("clap", new_clap).await?;
+            created.count
+        };
+
+        // 更新文章总点赞数
+        self.update_article_clap_count(article_id).await?;
+
+        // 获取文章最新的总点赞数
+        let total_claps = self.get_article_total_claps(article_id).await?;
+
+        Ok(crate::models::clap::ClapResponse {
+            user_clap_count,
+            total_claps,
+        })
+    }
+
+    /// 更新文章的总点赞数
+    async fn update_article_clap_count(&self, article_id: &str) -> Result<()> {
+        let query = r#"
+            LET $total = (SELECT math::sum(count) FROM clap WHERE article_id = $article_id);
+            UPDATE article SET clap_count = $total WHERE id = $article_id;
+        "#;
+
+        self.db.query_with_params(query, json!({
+            "article_id": article_id
+        })).await?;
+
+        Ok(())
+    }
+
+    /// 获取文章的总点赞数
+    async fn get_article_total_claps(&self, article_id: &str) -> Result<i64> {
+        let query = r#"
+            SELECT clap_count FROM article WHERE id = $article_id
+        "#;
+
+        let mut response = self.db.query_with_params(query, json!({
+            "article_id": article_id
+        })).await?;
+
+        let result: Vec<serde_json::Value> = response.take(0)?;
+        let count = result.first()
+            .and_then(|v| v.get("clap_count"))
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0);
+
+        Ok(count)
+    }
 }

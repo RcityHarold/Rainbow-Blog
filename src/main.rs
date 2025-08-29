@@ -38,6 +38,11 @@ use crate::{
         SearchService,
         MediaService,
         RecommendationService,
+        PublicationService,
+        BookmarkService,
+        FollowService,
+        SeriesService,
+        AnalyticsService,
     },
 };
 
@@ -98,6 +103,12 @@ async fn main() -> anyhow::Result<()> {
     let search_service = SearchService::new(db.clone()).await?;
     let media_service = MediaService::new(&config).await?;
     let recommendation_service = RecommendationService::new(db.clone()).await?;
+    let publication_service = PublicationService::new(db.clone()).await?;
+    let bookmark_service = BookmarkService::new(db.clone()).await?;
+    let follow_service = FollowService::new(db.clone(), notification_service.clone()).await?;
+    let tag_service = crate::services::tag::TagService::new(db.clone()).await?;
+    let series_service = SeriesService::new(db.clone()).await?;
+    let analytics_service = AnalyticsService::new(db.clone()).await?;
 
     // 创建应用状态
     let app_state = Arc::new(AppState {
@@ -111,6 +122,12 @@ async fn main() -> anyhow::Result<()> {
         search_service,
         media_service,
         recommendation_service,
+        publication_service,
+        bookmark_service,
+        follow_service,
+        tag_service,
+        series_service,
+        analytics_service,
     });
 
     // 启动后台任务
@@ -140,6 +157,11 @@ async fn main() -> anyhow::Result<()> {
         .nest("/api/blog/search", routes::search::router())
         .nest("/api/blog/media", routes::media::router())
         .nest("/api/blog/stats", routes::stats::router())
+        .nest("/api/blog/bookmarks", routes::bookmarks::router())
+        .nest("/api/blog/follows", routes::follows::router())
+        .nest("/api/blog/recommendations", routes::recommendations::router())
+        .nest("/api/blog/series", routes::series::router())
+        .nest("/api/blog/analytics", routes::analytics::router())
         .layer(cors)
         .layer(CompressionLayer::new())
         .layer(TraceLayer::new_for_http())

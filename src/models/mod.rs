@@ -8,6 +8,9 @@ pub mod bookmark;
 pub mod follow;
 pub mod series;
 pub mod notification;
+pub mod search;
+pub mod recommendation;
+pub mod analytics;
 
 // 重新导出常用类型
 pub use user::*;
@@ -20,3 +23,6 @@ pub use bookmark::*;
 pub use follow::*;
 pub use series::*;
 pub use notification::*;
+pub use search::*;
+pub use recommendation::*;
+pub use analytics::*;

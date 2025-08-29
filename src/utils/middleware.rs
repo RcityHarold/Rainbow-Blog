@@ -290,3 +290,19 @@ impl Default for RateLimitConfig {
     }
 }
 
+/// 可选认证提取器
+pub struct OptionalAuth(pub Option<crate::services::auth::User>);
+
+#[async_trait::async_trait]
+impl<S> axum::extract::FromRequestParts<S> for OptionalAuth
+where
+    S: Send + Sync,
+{
+    type Rejection = AppError;
+
+    async fn from_request_parts(parts: &mut axum::http::request::Parts, _state: &S) -> Result<Self, Self::Rejection> {
+        let user = parts.extensions.get::<crate::services::auth::User>().cloned();
+        Ok(OptionalAuth(user))
+    }
+}
+

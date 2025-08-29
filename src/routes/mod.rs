@@ -7,3 +7,8 @@ pub mod publications;
 pub mod search;
 pub mod media;
 pub mod stats;
+pub mod bookmarks;
+pub mod follows;
+pub mod recommendations;
+pub mod series;
+pub mod analytics;

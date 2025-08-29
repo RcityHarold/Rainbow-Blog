@@ -162,7 +162,7 @@ pub struct ArticleResponse {
     pub user_clap_count: Option<i32>, // 当前用户点赞次数
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ArticleListItem {
     pub id: String,
     pub title: String,
@@ -184,7 +184,7 @@ pub struct ArticleListItem {
     pub published_at: Option<DateTime<Utc>>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthorInfo {
     pub id: String,
     pub username: String,
@@ -193,7 +193,7 @@ pub struct AuthorInfo {
     pub is_verified: bool,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PublicationInfo {
     pub id: String,
     pub name: String,
@@ -209,7 +209,7 @@ pub struct SeriesInfo {
     pub order: i32,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TagInfo {
     pub id: String,
     pub name: String,

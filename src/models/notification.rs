@@ -13,3 +13,22 @@ pub struct Notification {
     pub read_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateNotificationRequest {
+    pub recipient_id: String,
+    pub notification_type: NotificationType,
+    pub title: String,
+    pub message: String,
+    pub data: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum NotificationType {
+    Follow,
+    ArticlePublished,
+    Comment,
+    CommentReply,
+    Clap,
+    Mention,
+}

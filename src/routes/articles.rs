@@ -31,6 +31,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/:id/unpublish", post(unpublish_article))
         .route("/:id", put(update_article).delete(delete_article))
         .route("/:id/view", post(increment_view_count))
+        .route("/:id/clap", post(clap_article))
 }
 
 /// 获取文章列表
@@ -297,5 +298,34 @@ pub async fn increment_view_count(
     Ok(Json(json!({
         "success": true,
         "message": "View count incremented"
+    })))
+}
+
+/// 为文章点赞
+/// POST /api/articles/:id/clap
+pub async fn clap_article(
+    State(app_state): State<Arc<AppState>>,
+    Path(article_id): Path<String>,
+    Extension(user): Extension<User>,
+    Json(request): Json<crate::models::clap::AddClapRequest>,
+) -> Result<Json<Value>> {
+    debug!("User {} clapping article: {} with count {}", user.id, article_id, request.count);
+
+    // 验证请求
+    use validator::Validate;
+    request.validate()
+        .map_err(|e| AppError::ValidatorError(e))?;
+
+    // 为文章点赞
+    let response = app_state.article_service
+        .clap_article(&article_id, &user.id, request.count)
+        .await?;
+
+    info!("User {} clapped article: {} (total claps: {})", user.id, article_id, response.total_claps);
+
+    Ok(Json(json!({
+        "success": true,
+        "data": response,
+        "message": "Article clapped successfully"
     })))
 }

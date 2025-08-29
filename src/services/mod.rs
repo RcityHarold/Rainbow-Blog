@@ -9,6 +9,10 @@ pub mod media;
 pub mod recommendation;
 pub mod publication;
 pub mod tag;
+pub mod bookmark;
+pub mod follow;
+pub mod series;
+pub mod analytics;
 
 // 重新导出常用类型
 pub use database::Database;
@@ -22,3 +26,7 @@ pub use media::MediaService;
 pub use recommendation::RecommendationService;
 pub use publication::PublicationService;
 pub use tag::TagService;
+pub use bookmark::BookmarkService;
+pub use follow::FollowService;
+pub use series::SeriesService;
+pub use analytics::AnalyticsService;

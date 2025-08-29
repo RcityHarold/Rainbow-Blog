@@ -10,6 +10,12 @@ use crate::{
         search::SearchService,
         media::MediaService,
         recommendation::RecommendationService,
+        publication::PublicationService,
+        bookmark::BookmarkService,
+        follow::FollowService,
+        tag::TagService,
+        series::SeriesService,
+        analytics::AnalyticsService,
     },
 };
 
@@ -46,6 +52,24 @@ pub struct AppState {
     
     /// 推荐服务
     pub recommendation_service: RecommendationService,
+    
+    /// 出版物服务
+    pub publication_service: PublicationService,
+    
+    /// 书签服务
+    pub bookmark_service: BookmarkService,
+    
+    /// 关注服务
+    pub follow_service: FollowService,
+    
+    /// 标签服务
+    pub tag_service: TagService,
+    
+    /// 系列服务
+    pub series_service: SeriesService,
+    
+    /// 统计分析服务
+    pub analytics_service: AnalyticsService,
 }
 
 impl AppState {
