@@ -165,7 +165,7 @@ impl AnalyticsService {
                 bookmarks: article_data["bookmarks"].as_i64().unwrap_or(0),
                 shares: article_data["shares"].as_i64().unwrap_or(0),
                 avg_read_time: article_data["avg_read_time"].as_f64().unwrap_or(0.0),
-                bounce_rate: 0.0, // TODO: 实现跳出率计算
+                bounce_rate: self.calculate_bounce_rate(article_id).await.unwrap_or(0.0),
                 engagement_rate: article_data["engagement_rate"].as_f64().unwrap_or(0.0),
                 published_at: article_data["published_at"]
                     .as_str()
@@ -223,21 +223,32 @@ impl AnalyticsService {
             ORDER BY date
         "#;
 
-        // 简化版本，获取每日的文章统计
+        // 简化版本，获取每日的文章统计和新关注者
         let simple_query = r#"
             SELECT 
-                DATE(published_at) as date,
-                SUM(view_count) as views,
-                SUM(clap_count) as claps,
-                SUM(comment_count) as comments,
-                SUM(bookmark_count) as bookmarks,
-                COUNT(*) as articles_published
-            FROM article
-            WHERE author_id = $user_id
-            AND status = 'published'
-            AND published_at >= $start_date
-            AND published_at <= $end_date
-            GROUP BY DATE(published_at)
+                DATE(a.published_at) as date,
+                SUM(a.view_count) as views,
+                SUM(a.clap_count) as claps,
+                SUM(a.comment_count) as comments,
+                SUM(a.bookmark_count) as bookmarks,
+                COUNT(a.id) as articles_published,
+                COALESCE(f.new_followers, 0) as new_followers
+            FROM articles a
+            LEFT JOIN (
+                SELECT 
+                    DATE(created_at) as follow_date,
+                    COUNT(*) as new_followers
+                FROM user_follows
+                WHERE following_id = $user_id
+                AND created_at >= $start_date
+                AND created_at <= $end_date
+                GROUP BY DATE(created_at)
+            ) f ON DATE(a.published_at) = f.follow_date
+            WHERE a.author_id = $user_id
+            AND a.status = 'published'
+            AND a.published_at >= $start_date
+            AND a.published_at <= $end_date
+            GROUP BY DATE(a.published_at), f.new_followers
             ORDER BY date
         "#;
 
@@ -261,7 +272,7 @@ impl AnalyticsService {
                 claps: item["claps"].as_i64().unwrap_or(0),
                 comments: item["comments"].as_i64().unwrap_or(0),
                 bookmarks: item["bookmarks"].as_i64().unwrap_or(0),
-                new_followers: 0, // TODO: 实现新关注者统计
+                new_followers: item["new_followers"].as_i64().unwrap_or(0),
                 articles_published: item["articles_published"].as_i64().unwrap_or(0),
             });
         }
@@ -276,66 +287,8 @@ impl AnalyticsService {
         start_date: &DateTime<Utc>,
         end_date: &DateTime<Utc>,
     ) -> Result<AudienceAnalytics> {
-        // 这是一个简化版本，实际应该有更复杂的用户追踪
-        let total_readers = self.get_total_readers_count(user_id, start_date, end_date).await?;
-        let returning_readers = (total_readers as f64 * 0.3) as i64; // 假设30%是回访读者
-        let new_readers = total_readers - returning_readers;
-
-        Ok(AudienceAnalytics {
-            total_readers,
-            returning_readers,
-            new_readers,
-            avg_session_duration: 180.0, // 假设平均3分钟
-            top_referrers: vec![
-                ReferrerInfo {
-                    source: "Direct".to_string(),
-                    count: (total_readers as f64 * 0.4) as i64,
-                    percentage: 40.0,
-                },
-                ReferrerInfo {
-                    source: "Google".to_string(),
-                    count: (total_readers as f64 * 0.3) as i64,
-                    percentage: 30.0,
-                },
-                ReferrerInfo {
-                    source: "Social Media".to_string(),
-                    count: (total_readers as f64 * 0.2) as i64,
-                    percentage: 20.0,
-                },
-                ReferrerInfo {
-                    source: "Other".to_string(),
-                    count: (total_readers as f64 * 0.1) as i64,
-                    percentage: 10.0,
-                },
-            ],
-            device_breakdown: DeviceBreakdown {
-                desktop: (total_readers as f64 * 0.6) as i64,
-                mobile: (total_readers as f64 * 0.35) as i64,
-                tablet: (total_readers as f64 * 0.05) as i64,
-            },
-            geographic_distribution: vec![
-                GeographicInfo {
-                    country: "United States".to_string(),
-                    count: (total_readers as f64 * 0.4) as i64,
-                    percentage: 40.0,
-                },
-                GeographicInfo {
-                    country: "United Kingdom".to_string(),
-                    count: (total_readers as f64 * 0.2) as i64,
-                    percentage: 20.0,
-                },
-                GeographicInfo {
-                    country: "China".to_string(),
-                    count: (total_readers as f64 * 0.15) as i64,
-                    percentage: 15.0,
-                },
-                GeographicInfo {
-                    country: "Others".to_string(),
-                    count: (total_readers as f64 * 0.25) as i64,
-                    percentage: 25.0,
-                },
-            ],
-        })
+        // 使用真实的受众分析实现
+        self.get_real_audience_analytics(user_id, start_date, end_date).await
     }
 
     /// 获取标签分析
@@ -371,14 +324,20 @@ impl AnalyticsService {
         let mut results = Vec::new();
 
         for tag_data in tags {
+            let tag_id = tag_data["tag_id"].as_str().unwrap_or("");
+            let current_views = tag_data["total_views"].as_i64().unwrap_or(0);
+            
+            // 计算过去30天的增长率
+            let growth_rate = self.calculate_tag_growth_rate(user_id, tag_id, current_views).await.unwrap_or(0.0);
+            
             results.push(TagAnalytics {
-                tag_id: tag_data["tag_id"].as_str().unwrap_or("").to_string(),
+                tag_id: tag_id.to_string(),
                 name: tag_data["name"].as_str().unwrap_or("").to_string(),
                 total_articles: tag_data["total_articles"].as_i64().unwrap_or(0),
-                total_views: tag_data["total_views"].as_i64().unwrap_or(0),
+                total_views: current_views,
                 total_claps: tag_data["total_claps"].as_i64().unwrap_or(0),
                 avg_engagement: tag_data["avg_engagement"].as_f64().unwrap_or(0.0),
-                growth_rate: 0.0, // TODO: 实现增长率计算
+                growth_rate,
             });
         }
 
@@ -819,5 +778,428 @@ impl AnalyticsService {
             }
             _ => Err(AppError::BadRequest("Export format not supported yet".to_string())),
         }
+    }
+
+    /// 计算文章的跳出率
+    async fn calculate_bounce_rate(&self, article_id: &str) -> Result<f64> {
+        // 跳出率 = 只浏览一页就离开的会话数 / 总会话数
+        let query = r#"
+            LET article_sessions = (
+                SELECT * FROM session_events 
+                WHERE article_id = $article_id
+                AND created_at >= time::now() - 30d
+                GROUP BY session_id
+            );
+            
+            LET total_sessions = array::len(article_sessions);
+            LET bounce_sessions = (
+                SELECT * FROM $article_sessions 
+                WHERE array::len(page_views) = 1
+                AND time_on_page < 30
+            );
+            
+            RETURN {
+                total_sessions: total_sessions,
+                bounce_sessions: array::len(bounce_sessions),
+                bounce_rate: IF total_sessions > 0 THEN 
+                    (array::len(bounce_sessions) * 100.0 / total_sessions) 
+                ELSE 0.0 END
+            };
+        "#;
+        
+        let mut response = self.db
+            .query_with_params(query, &[("article_id", json!(article_id))])
+            .await?;
+        
+        let data: Vec<Value> = response.take(0)?;
+        if let Some(data) = data.into_iter().next() {
+            Ok(data["bounce_rate"].as_f64().unwrap_or(0.0))
+        } else {
+            // 如果没有会话数据，使用基于阅读时间的估算
+            self.estimate_bounce_rate_from_reading_time(article_id).await
+        }
+    }
+
+    /// 基于阅读时间估算跳出率
+    async fn estimate_bounce_rate_from_reading_time(&self, article_id: &str) -> Result<f64> {
+        let query = r#"
+            SELECT 
+                avg_read_time,
+                view_count,
+                comment_count + clap_count as engagement_count
+            FROM articles 
+            WHERE id = $article_id
+        "#;
+        
+        let mut response = self.db
+            .query_with_params(query, &[("article_id", json!(article_id))])
+            .await?;
+        
+        let data: Vec<Value> = response.take(0)?;
+        if let Some(data) = data.into_iter().next() {
+            let avg_read_time = data["avg_read_time"].as_f64().unwrap_or(0.0);
+            let view_count = data["view_count"].as_i64().unwrap_or(1);
+            let engagement_count = data["engagement_count"].as_i64().unwrap_or(0);
+            
+            // 基于经验公式估算跳出率
+            let engagement_rate = engagement_count as f64 / view_count as f64;
+            let base_bounce_rate = if avg_read_time < 30.0 {
+                85.0 // 阅读时间少于30秒，高跳出率
+            } else if avg_read_time < 120.0 {
+                65.0 // 阅读时间1-2分钟，中等跳出率
+            } else {
+                45.0 // 阅读时间超过2分钟，低跳出率
+            };
+            
+            // 参与度调整
+            let adjusted_bounce_rate: f64 = base_bounce_rate * (1.0 - engagement_rate * 0.5);
+            Ok(adjusted_bounce_rate.max(10.0).min(95.0)) // 限制在10%-95%之间
+        } else {
+            Ok(70.0) // 默认跳出率
+        }
+    }
+
+    /// 计算新关注者数量
+    async fn calculate_new_followers(&self, user_id: &str, start_date: &DateTime<Utc>, end_date: &DateTime<Utc>) -> Result<i64> {
+        let query = r#"
+            SELECT count() as new_followers
+            FROM user_follows
+            WHERE following_id = $user_id
+            AND created_at >= $start_date
+            AND created_at <= $end_date
+        "#;
+        
+        let mut response = self.db
+            .query_with_params(query, &[
+                ("user_id", json!(user_id)),
+                ("start_date", json!(start_date.to_rfc3339())),
+                ("end_date", json!(end_date.to_rfc3339())),
+            ])
+            .await?;
+        
+        let data: Vec<Value> = response.take(0)?;
+        Ok(data.into_iter().next()
+            .and_then(|data| data["new_followers"].as_i64())
+            .unwrap_or(0))
+    }
+
+    /// 计算增长率
+    async fn calculate_growth_rate(&self, current_value: i64, previous_value: i64) -> f64 {
+        if previous_value == 0 {
+            if current_value > 0 {
+                100.0 // 从0开始算100%增长
+            } else {
+                0.0
+            }
+        } else {
+            ((current_value - previous_value) as f64 / previous_value as f64) * 100.0
+        }
+    }
+
+    /// 获取上一个周期的数据用于增长率计算
+    async fn get_previous_period_data(&self, user_id: &str, current_start: &DateTime<Utc>, current_end: &DateTime<Utc>) -> Result<(i64, i64, i64, i64)> {
+        let period_duration = *current_end - *current_start;
+        let previous_end = *current_start;
+        let previous_start = previous_end - period_duration;
+        
+        let query = r#"
+            LET user_articles = (SELECT id FROM articles WHERE author_id = $user_id);
+            LET previous_views = (
+                SELECT sum(view_count) as total FROM articles 
+                WHERE id IN $user_articles
+                AND updated_at >= $previous_start AND updated_at < $previous_end
+            );
+            LET previous_claps = (
+                SELECT count() as total FROM article_claps 
+                WHERE article_id IN (SELECT VALUE id FROM $user_articles)
+                AND created_at >= $previous_start AND created_at < $previous_end
+            );
+            LET previous_comments = (
+                SELECT count() as total FROM comments 
+                WHERE article_id IN (SELECT VALUE id FROM $user_articles)
+                AND created_at >= $previous_start AND created_at < $previous_end
+            );
+            LET previous_followers = (
+                SELECT count() as total FROM user_follows 
+                WHERE following_id = $user_id
+                AND created_at >= $previous_start AND created_at < $previous_end
+            );
+            
+            RETURN {
+                views: $previous_views[0].total OR 0,
+                claps: $previous_claps[0].total OR 0,
+                comments: $previous_comments[0].total OR 0,
+                followers: $previous_followers[0].total OR 0
+            };
+        "#;
+        
+        let mut response = self.db
+            .query_with_params(query, &[
+                ("user_id", json!(user_id)),
+                ("previous_start", json!(previous_start.to_rfc3339())),
+                ("previous_end", json!(previous_end.to_rfc3339())),
+            ])
+            .await?;
+        
+        let data: Vec<Value> = response.take(0)?;
+        if let Some(data) = data.into_iter().next() {
+            Ok((
+                data["views"].as_i64().unwrap_or(0),
+                data["claps"].as_i64().unwrap_or(0),
+                data["comments"].as_i64().unwrap_or(0),
+                data["followers"].as_i64().unwrap_or(0),
+            ))
+        } else {
+            Ok((0, 0, 0, 0))
+        }
+    }
+
+    /// 获取真实的受众分析数据
+    async fn get_real_audience_analytics(&self, user_id: &str, start_date: &DateTime<Utc>, end_date: &DateTime<Utc>) -> Result<AudienceAnalytics> {
+        // 获取读者统计
+        let reader_stats_query = r#"
+            LET user_articles = (SELECT id FROM articles WHERE author_id = $user_id);
+            
+            LET session_data = (
+                SELECT 
+                    user_id,
+                    count() as visit_count,
+                    array::len(array::distinct(article_id)) as articles_read,
+                    sum(reading_time) as total_reading_time,
+                    first(country) as country,
+                    first(city) as city,
+                    first(device_type) as device_type,
+                    first(browser) as browser
+                FROM reading_sessions 
+                WHERE article_id IN (SELECT VALUE id FROM $user_articles)
+                AND created_at >= $start_date AND created_at <= $end_date
+                GROUP BY user_id
+            );
+            
+            LET total_readers = array::len($session_data);
+            LET returning_readers = array::len(array::filter($session_data, |s| s.visit_count > 1));
+            LET new_readers = $total_readers - $returning_readers;
+            
+            LET avg_session = math::mean(array::map($session_data, |s| s.total_reading_time));
+            
+            RETURN {
+                total_readers: $total_readers,
+                returning_readers: $returning_readers,
+                new_readers: $new_readers,
+                avg_session_duration: $avg_session OR 180.0,
+                sessions: $session_data
+            };
+        "#;
+        
+        let mut response = self.db
+            .query_with_params(reader_stats_query, &[
+                ("user_id", json!(user_id)),
+                ("start_date", json!(start_date.to_rfc3339())),
+                ("end_date", json!(end_date.to_rfc3339())),
+            ])
+            .await?;
+        
+        let data: Vec<Value> = response.take(0)?;
+        if let Some(data) = data.into_iter().next() {
+            let empty_vec = vec![];
+            let sessions = data["sessions"].as_array().unwrap_or(&empty_vec);
+            
+            // 统计地理分布
+            let mut countries = HashMap::new();
+            let mut cities = HashMap::new();
+            let mut devices = HashMap::new();
+            let mut browsers = HashMap::new();
+            
+            for session in sessions {
+                // 统计国家
+                if let Some(country) = session["country"].as_str() {
+                    *countries.entry(country.to_string()).or_insert(0) += 1;
+                }
+                
+                // 统计城市
+                if let Some(city) = session["city"].as_str() {
+                    *cities.entry(city.to_string()).or_insert(0) += 1;
+                }
+                
+                // 统计设备
+                if let Some(device) = session["device_type"].as_str() {
+                    *devices.entry(device.to_string()).or_insert(0) += 1;
+                }
+                
+                // 统计浏览器
+                if let Some(browser) = session["browser"].as_str() {
+                    *browsers.entry(browser.to_string()).or_insert(0) += 1;
+                }
+            }
+            
+            let total_sessions = sessions.len() as f64;
+            
+            Ok(AudienceAnalytics {
+                total_readers: data["total_readers"].as_i64().unwrap_or(0),
+                returning_readers: data["returning_readers"].as_i64().unwrap_or(0),
+                new_readers: data["new_readers"].as_i64().unwrap_or(0),
+                avg_session_duration: data["avg_session_duration"].as_f64().unwrap_or(180.0),
+                top_referrers: self.get_top_referrers(user_id, start_date, end_date).await.unwrap_or_default(),
+                geographic_data: countries.into_iter()
+                    .map(|(country, count)| GeographicData {
+                        country: country.clone(),
+                        city: None,
+                        readers: count as i64,
+                        percentage: (count as f64 / total_sessions * 100.0) as f32,
+                    })
+                    .collect(),
+                device_data: devices.into_iter()
+                    .map(|(device, count)| DeviceData {
+                        device_type: device,
+                        readers: count as i64,
+                        percentage: (count as f64 / total_sessions * 100.0) as f32,
+                        avg_session_duration: 180.0, // 可以进一步细化
+                    })
+                    .collect(),
+                reading_patterns: self.get_reading_patterns(user_id, start_date, end_date).await.unwrap_or_default(),
+            })
+        } else {
+            // 如果没有会话数据，返回估算的数据
+            let estimated_readers = self.get_estimated_readers_count(user_id, start_date, end_date).await?;
+            Ok(AudienceAnalytics {
+                total_readers: estimated_readers,
+                returning_readers: (estimated_readers as f64 * 0.35) as i64,
+                new_readers: (estimated_readers as f64 * 0.65) as i64,
+                avg_session_duration: 180.0,
+                top_referrers: vec![],
+                geographic_data: vec![],
+                device_data: vec![],
+                reading_patterns: vec![],
+            })
+        }
+    }
+
+    /// 获取主要流量来源
+    async fn get_top_referrers(&self, user_id: &str, start_date: &DateTime<Utc>, end_date: &DateTime<Utc>) -> Result<Vec<ReferrerData>> {
+        let query = r#"
+            SELECT 
+                referrer,
+                count() as visits,
+                array::len(array::distinct(user_id)) as unique_visitors
+            FROM page_visits 
+            WHERE article_id IN (SELECT id FROM articles WHERE author_id = $user_id)
+            AND created_at >= $start_date AND created_at <= $end_date
+            AND referrer IS NOT NULL
+            GROUP BY referrer
+            ORDER BY visits DESC
+            LIMIT 10
+        "#;
+        
+        let mut response = self.db
+            .query_with_params(query, &[
+                ("user_id", json!(user_id)),
+                ("start_date", json!(start_date.to_rfc3339())),
+                ("end_date", json!(end_date.to_rfc3339())),
+            ])
+            .await?;
+
+        let data: Vec<Value> = response.take(0)?;
+        
+        Ok(data.into_iter()
+            .map(|item| ReferrerData {
+                source: item["referrer"].as_str().unwrap_or("Unknown").to_string(),
+                visits: item["visits"].as_i64().unwrap_or(0),
+                unique_visitors: item["unique_visitors"].as_i64().unwrap_or(0),
+                conversion_rate: 0.0, // 可以根据需要实现转化率计算
+            })
+            .collect())
+    }
+
+    /// 获取阅读模式
+    async fn get_reading_patterns(&self, user_id: &str, start_date: &DateTime<Utc>, end_date: &DateTime<Utc>) -> Result<Vec<ReadingPattern>> {
+        let query = r#"
+            SELECT 
+                time::hour(created_at) as hour,
+                count() as readings,
+                math::mean(reading_time) as avg_reading_time
+            FROM reading_sessions 
+            WHERE article_id IN (SELECT id FROM articles WHERE author_id = $user_id)
+            AND created_at >= $start_date AND created_at <= $end_date
+            GROUP BY hour
+            ORDER BY hour
+        "#;
+        
+        let mut response = self.db
+            .query_with_params(query, &[
+                ("user_id", json!(user_id)),
+                ("start_date", json!(start_date.to_rfc3339())),
+                ("end_date", json!(end_date.to_rfc3339())),
+            ])
+            .await?;
+        
+        let data: Vec<Value> = response.take(0)?;
+        
+        Ok(data.into_iter()
+            .map(|item| ReadingPattern {
+                hour: item["hour"].as_i64().unwrap_or(0) as u8,
+                readings: item["readings"].as_i64().unwrap_or(0),
+                avg_reading_time: item["avg_reading_time"].as_f64().unwrap_or(0.0),
+            })
+            .collect())
+    }
+
+    /// 估算读者数量（当没有会话跟踪时）
+    async fn get_estimated_readers_count(&self, user_id: &str, start_date: &DateTime<Utc>, end_date: &DateTime<Utc>) -> Result<i64> {
+        let query = r#"
+            SELECT sum(view_count) as total_views 
+            FROM articles 
+            WHERE author_id = $user_id
+            AND updated_at >= $start_date AND updated_at <= $end_date
+        "#;
+        
+        let mut response = self.db
+            .query_with_params(query, &[
+                ("user_id", json!(user_id)),
+                ("start_date", json!(start_date.to_rfc3339())),
+                ("end_date", json!(end_date.to_rfc3339())),
+            ])
+            .await?;
+        
+        let data: Vec<Value> = response.take(0)?;
+        let total_views = data.into_iter().next()
+            .and_then(|data| data["total_views"].as_i64())
+            .unwrap_or(0);
+        
+        // 估算独立读者数 = 总浏览量 * 0.7 (假设每个读者平均浏览1.43篇文章)
+        Ok((total_views as f64 * 0.7) as i64)
+    }
+
+    /// 计算标签的增长率
+    async fn calculate_tag_growth_rate(&self, user_id: &str, tag_id: &str, current_views: i64) -> Result<f64> {
+        let thirty_days_ago = Utc::now() - Duration::days(30);
+        let sixty_days_ago = Utc::now() - Duration::days(60);
+        
+        // 获取30天前的浏览量作为对比基准
+        let query = r#"
+            SELECT SUM(a.view_count) as previous_views
+            FROM articles a
+            JOIN article_tags at ON a.id = at.article_id
+            WHERE a.author_id = $user_id
+            AND at.tag_id = $tag_id
+            AND a.status = 'published'
+            AND a.published_at >= $sixty_days_ago
+            AND a.published_at < $thirty_days_ago
+        "#;
+        
+        let mut response = self.db
+            .query_with_params(query, &[
+                ("user_id", json!(user_id)),
+                ("tag_id", json!(tag_id)),
+                ("sixty_days_ago", json!(sixty_days_ago.to_rfc3339())),
+                ("thirty_days_ago", json!(thirty_days_ago.to_rfc3339())),
+            ])
+            .await?;
+        
+        let data: Vec<Value> = response.take(0)?;
+        let previous_views = data.into_iter().next()
+            .and_then(|data| data["previous_views"].as_i64())
+            .unwrap_or(0);
+        
+        Ok(self.calculate_growth_rate(current_views, previous_views).await)
     }
 }

@@ -55,9 +55,10 @@ pub struct AudienceAnalytics {
     pub returning_readers: i64,
     pub new_readers: i64,
     pub avg_session_duration: f64,
-    pub top_referrers: Vec<ReferrerInfo>,
-    pub device_breakdown: DeviceBreakdown,
-    pub geographic_distribution: Vec<GeographicInfo>,
+    pub top_referrers: Vec<ReferrerData>,
+    pub geographic_data: Vec<GeographicData>,
+    pub device_data: Vec<DeviceData>,
+    pub reading_patterns: Vec<ReadingPattern>,
 }
 
 /// 推荐来源信息
@@ -82,6 +83,41 @@ pub struct GeographicInfo {
     pub country: String,
     pub count: i64,
     pub percentage: f64,
+}
+
+/// 地理数据（用于真实受众分析）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GeographicData {
+    pub country: String,
+    pub city: Option<String>,
+    pub readers: i64,
+    pub percentage: f32,
+}
+
+/// 设备数据
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeviceData {
+    pub device_type: String,
+    pub readers: i64,
+    pub percentage: f32,
+    pub avg_session_duration: f64,
+}
+
+/// 推荐数据
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReferrerData {
+    pub source: String,
+    pub visits: i64,
+    pub unique_visitors: i64,
+    pub conversion_rate: f64,
+}
+
+/// 阅读模式
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReadingPattern {
+    pub hour: u8,
+    pub readings: i64,
+    pub avg_reading_time: f64,
 }
 
 /// 标签分析

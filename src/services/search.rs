@@ -516,7 +516,7 @@ impl SearchService {
             SearchType::All => {
                 // 对每种类型进行有限搜索
                 if let Some(ref q) = query.q {
-                    results.articles = self.advanced_article_search(&query, 1, 5).await?;
+                    results.articles = self.advanced_article_search(&query, 1, 5, user_id).await?;
                     results.users = self.search_users(q, 1, 5).await?;
                     results.tags = self.search_tags(q, 1, 5).await?;
                     results.publications = self.search_publications(q, 1, 5).await?;
@@ -530,7 +530,7 @@ impl SearchService {
                     + results.series.len()) as i64;
             }
             SearchType::Articles => {
-                let (articles, total_count) = self.advanced_article_search_with_count(&query, page, limit).await?;
+                let (articles, total_count) = self.advanced_article_search_with_count(&query, page, limit, user_id).await?;
                 results.articles = articles;
                 results.total_results = total_count;
                 results.total_pages = ((total_count as f64) / (limit as f64)).ceil() as i32;
@@ -569,8 +569,9 @@ impl SearchService {
         query: &AdvancedSearchQuery,
         page: i32,
         limit: i32,
+        user_id: Option<&str>,
     ) -> Result<Vec<ArticleSearchResult>> {
-        let (articles, _) = self.advanced_article_search_with_count(query, page, limit).await?;
+        let (articles, _) = self.advanced_article_search_with_count(query, page, limit, user_id).await?;
         Ok(articles)
     }
     
@@ -580,6 +581,7 @@ impl SearchService {
         query: &AdvancedSearchQuery,
         page: i32,
         limit: i32,
+        user_id: Option<&str>,
     ) -> Result<(Vec<ArticleSearchResult>, i64)> {
         let offset = (page - 1) * limit;
         
@@ -659,7 +661,12 @@ impl SearchService {
         
         // 排除已读（需要用户ID）
         if let Some(true) = query.exclude_read {
-            // TODO: 实现已读记录功能
+            if let Some(user_id) = &user_id {
+                where_conditions.push(format!(
+                    "a.id NOT IN (SELECT article_id FROM user_read_history WHERE user_id = '{}')",
+                    user_id
+                ));
+            }
         }
         
         // 构建排序
