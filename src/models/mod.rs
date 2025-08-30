@@ -11,6 +11,9 @@ pub mod notification;
 pub mod search;
 pub mod recommendation;
 pub mod analytics;
+pub mod subscription;
+pub mod payment;
+pub mod response;
 
 // 重新导出常用类型
 pub use user::*;
@@ -26,3 +29,6 @@ pub use notification::*;
 pub use search::*;
 pub use recommendation::*;
 pub use analytics::*;
+pub use subscription::*;
+pub use payment::*;
+pub use response::*;

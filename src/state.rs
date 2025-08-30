@@ -16,6 +16,8 @@ use crate::{
         tag::TagService,
         series::SeriesService,
         analytics::AnalyticsService,
+        subscription::SubscriptionService,
+        payment::PaymentService,
     },
 };
 
@@ -70,6 +72,18 @@ pub struct AppState {
     
     /// 统计分析服务
     pub analytics_service: AnalyticsService,
+    
+    /// 订阅服务
+    pub subscription_service: SubscriptionService,
+    
+    /// 付费内容服务
+    pub payment_service: PaymentService,
+}
+
+impl Default for AppState {
+    fn default() -> Self {
+        panic!("AppState should not be constructed with default values - use proper initialization");
+    }
 }
 
 impl AppState {

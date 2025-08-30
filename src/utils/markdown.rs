@@ -259,6 +259,31 @@ impl MarkdownProcessor {
             .join("-")
     }
 
+    /// 提取内容预览（用于付费内容）
+    pub fn extract_preview(&self, markdown: &str, html: &str, percentage: u8) -> (String, String) {
+        let percentage = percentage.min(100);
+        
+        if percentage >= 100 {
+            return (markdown.to_string(), html.to_string());
+        }
+        
+        // 按段落分割内容
+        let paragraphs: Vec<&str> = markdown.split("\n\n").collect();
+        let total_paragraphs = paragraphs.len();
+        let preview_paragraphs = (total_paragraphs * percentage as usize / 100).max(1);
+        
+        let preview_markdown = paragraphs
+            .iter()
+            .take(preview_paragraphs)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        
+        let preview_html = self.to_html(&preview_markdown);
+        
+        (preview_markdown, preview_html)
+    }
+
     /// 在 Markdown 中添加目录链接
     pub fn add_toc_links(&self, markdown: &str) -> String {
         let toc = self.extract_toc(markdown);

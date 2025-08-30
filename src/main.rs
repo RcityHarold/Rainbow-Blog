@@ -43,6 +43,8 @@ use crate::{
         FollowService,
         SeriesService,
         AnalyticsService,
+        SubscriptionService,
+        PaymentService,
     },
 };
 
@@ -109,6 +111,8 @@ async fn main() -> anyhow::Result<()> {
     let tag_service = crate::services::tag::TagService::new(db.clone()).await?;
     let series_service = SeriesService::new(db.clone()).await?;
     let analytics_service = AnalyticsService::new(db.clone()).await?;
+    let subscription_service = SubscriptionService::new(db.clone(), &config).await?;
+    let payment_service = PaymentService::new(db.clone(), Arc::new(subscription_service.clone())).await?;
 
     // 创建应用状态
     let app_state = Arc::new(AppState {
@@ -128,6 +132,8 @@ async fn main() -> anyhow::Result<()> {
         tag_service,
         series_service,
         analytics_service,
+        subscription_service,
+        payment_service,
     });
 
     // 启动后台任务
@@ -162,6 +168,8 @@ async fn main() -> anyhow::Result<()> {
         .nest("/api/blog/recommendations", routes::recommendations::router())
         .nest("/api/blog/series", routes::series::router())
         .nest("/api/blog/analytics", routes::analytics::router())
+        .nest("/api/blog/subscriptions", routes::subscriptions::router())
+        .nest("/api/blog/payments", routes::payments::router())
         .layer(cors)
         .layer(CompressionLayer::new())
         .layer(TraceLayer::new_for_http())

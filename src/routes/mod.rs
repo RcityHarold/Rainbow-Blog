@@ -12,3 +12,5 @@ pub mod follows;
 pub mod recommendations;
 pub mod series;
 pub mod analytics;
+pub mod subscriptions;
+pub mod payments;

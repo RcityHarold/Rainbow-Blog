@@ -87,6 +87,11 @@ pub struct Config {
     // Monitoring
     pub metrics_enabled: bool,
     pub metrics_port: u16,
+
+    // Stripe payment configuration
+    pub stripe_secret_key: Option<String>,
+    pub stripe_publishable_key: Option<String>,
+    pub stripe_webhook_secret: Option<String>,
 }
 
 impl Config {
@@ -237,6 +242,10 @@ impl Config {
             metrics_port: env::var("METRICS_PORT")
                 .unwrap_or_else(|_| "9090".to_string())
                 .parse()?,
+
+            stripe_secret_key: env::var("STRIPE_SECRET_KEY").ok(),
+            stripe_publishable_key: env::var("STRIPE_PUBLISHABLE_KEY").ok(),
+            stripe_webhook_secret: env::var("STRIPE_WEBHOOK_SECRET").ok(),
         })
     }
 

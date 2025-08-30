@@ -13,6 +13,8 @@ pub mod bookmark;
 pub mod follow;
 pub mod series;
 pub mod analytics;
+pub mod subscription;
+pub mod payment;
 
 // 重新导出常用类型
 pub use database::Database;
@@ -30,3 +32,5 @@ pub use bookmark::BookmarkService;
 pub use follow::FollowService;
 pub use series::SeriesService;
 pub use analytics::AnalyticsService;
+pub use subscription::SubscriptionService;
+pub use payment::PaymentService;
