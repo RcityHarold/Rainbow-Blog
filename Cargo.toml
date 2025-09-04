@@ -10,19 +10,23 @@ keywords = ["blog", "medium", "publishing", "axum", "surrealdb"]
 
 [dependencies]
 # Web框架 (与Rainbow-docs相同版本)
-axum = { version = "0.6", features = ["headers", "multipart"] }
+axum = { version = "0.6", features = ["headers", "multipart", "ws"] }
 tower-http = { version = "0.4", features = ["cors", "compression-br", "compression-gzip", "trace"] }
 tower = { version = "0.4", features = ["util", "timeout", "load-shed", "limit"] }
 tokio = { version = "1.28", features = ["full"] }
 
 # 数据库 (与Rainbow-docs相同版本)
 surrealdb = { version = "1.5.6", features = ["protocol-http"] }
+sqlx = { version = "0.7", features = ["runtime-tokio", "postgres", "chrono", "uuid"] }
 
 # 使用soulcore进行数据库操作
 soulcore = { path = "../soulcore", default-features = false, features = ["storage", "surrealdb-http"] }
 
 # HTTP客户端
 reqwest = { version = "0.11", features = ["json", "multipart"] }
+
+# WebSocket支持
+futures = "0.3"
 
 # 认证相关 (与Rainbow-Auth集成)
 jsonwebtoken = "8.3"
@@ -112,6 +116,9 @@ futures-util = "0.3"
 
 # 速率限制
 governor = { version = "0.5", features = ["std", "jitter"] }
+
+# DNS解析
+trust-dns-resolver = "0.23"
 
 # 指标收集
 metrics = { version = "0.21", optional = true }

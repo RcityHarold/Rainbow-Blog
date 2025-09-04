@@ -45,7 +45,14 @@ use crate::{
         AnalyticsService,
         SubscriptionService,
         PaymentService,
+        RevenueService,
+        StripeService,
+        WebSocketService,
+        RealtimeService,
+        DomainService,
+        domain::DomainConfig,
     },
+    models::stripe::StripeConfig,
 };
 
 #[tokio::main]
@@ -113,6 +120,21 @@ async fn main() -> anyhow::Result<()> {
     let analytics_service = AnalyticsService::new(db.clone()).await?;
     let subscription_service = SubscriptionService::new(db.clone(), &config).await?;
     let payment_service = PaymentService::new(db.clone(), Arc::new(subscription_service.clone())).await?;
+    let revenue_service = RevenueService::new(db.clone()).await?;
+    let stripe_service = StripeService::new(db.clone(), StripeConfig::default()).await?;
+    let websocket_service = WebSocketService::new(db.clone()).await?;
+    let realtime_service = RealtimeService::new(Arc::new(websocket_service.clone()), Arc::new(notification_service.clone()));
+    
+    // Initialize domain service with default config
+    let domain_config = DomainConfig {
+        base_domain: config.base_domain.clone().unwrap_or_else(|| "platform.local".to_string()),
+        dns_verification_timeout: 300, // 5 minutes
+        ssl_provider_endpoint: config.ssl_provider_endpoint.clone(),
+        ssl_provider_api_key: config.ssl_provider_api_key.clone(),
+        auto_provision_ssl: config.auto_provision_ssl.unwrap_or(false),
+        ssl_webhook_url: config.ssl_webhook_url.clone(),
+    };
+    let domain_service = DomainService::new(db.clone(), domain_config).await?;
 
     // 创建应用状态
     let app_state = Arc::new(AppState {
@@ -134,6 +156,11 @@ async fn main() -> anyhow::Result<()> {
         analytics_service,
         subscription_service,
         payment_service,
+        revenue_service,
+        stripe_service,
+        websocket_service,
+        realtime_service,
+        domain_service,
     });
 
     // 启动后台任务
@@ -150,10 +177,13 @@ async fn main() -> anyhow::Result<()> {
                 .collect::<Vec<_>>(),
         );
 
-    // 构建应用路由 - 使用/api/blog/前缀避免网关路由冲突
+    // 构建应用路由
     let app = Router::new()
+        // Health check endpoints (no domain context needed)
         .route("/", get(health_check))
         .route("/health", get(health_check))
+        
+        // API routes with /api/blog/ prefix (traditional API access)
         .nest("/api/blog/auth", routes::auth::router())
         .nest("/api/blog/users", routes::users::router())
         .nest("/api/blog/articles", routes::articles::router())
@@ -170,9 +200,49 @@ async fn main() -> anyhow::Result<()> {
         .nest("/api/blog/analytics", routes::analytics::router())
         .nest("/api/blog/subscriptions", routes::subscriptions::router())
         .nest("/api/blog/payments", routes::payments::router())
+        .nest("/api/blog/revenue", routes::revenue::router())
+        .nest("/api/blog/stripe", routes::stripe::router())
+        .nest("/api/blog/ws", routes::websocket::router())
+        .nest("/api/blog/domains", routes::domain::router())
+        
+        // Domain-specific routes (work with custom domains and subdomains)
+        // These routes are merged at the root level and rely on domain routing middleware
+        .merge(routes::publication_content::router())
+        
+        // Apply middleware layers (order matters - they are applied in reverse)
         .layer(cors)
         .layer(CompressionLayer::new())
         .layer(TraceLayer::new_for_http())
+        
+        // Domain routing middleware should be applied early to set publication context
+        .layer(middleware::from_fn_with_state(
+            app_state.clone(),
+            utils::middleware::domain_routing_middleware,
+        ))
+        
+        // Authentication middleware (can use publication context if available)
+        .layer(middleware::from_fn_with_state(
+            app_state.clone(),
+            utils::middleware::auth_middleware,
+        ))
+        
+        // Rate limiting
+        .layer(middleware::from_fn_with_state(
+            app_state.clone(),
+            utils::middleware::rate_limit_middleware,
+        ))
+        
+        // Logging and security
+        .layer(middleware::from_fn(
+            utils::middleware::request_logging_middleware,
+        ))
+        .layer(middleware::from_fn(
+            utils::middleware::security_headers_middleware,
+        ))
+        .layer(middleware::from_fn(
+            utils::middleware::request_id_middleware,
+        ))
+        
         .with_state(app_state);
 
     // 启动指标服务器（如果启用）

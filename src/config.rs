@@ -92,6 +92,13 @@ pub struct Config {
     pub stripe_secret_key: Option<String>,
     pub stripe_publishable_key: Option<String>,
     pub stripe_webhook_secret: Option<String>,
+
+    // Domain configuration
+    pub base_domain: Option<String>,
+    pub ssl_provider_endpoint: Option<String>,
+    pub ssl_provider_api_key: Option<String>,
+    pub auto_provision_ssl: Option<bool>,
+    pub ssl_webhook_url: Option<String>,
 }
 
 impl Config {
@@ -246,6 +253,14 @@ impl Config {
             stripe_secret_key: env::var("STRIPE_SECRET_KEY").ok(),
             stripe_publishable_key: env::var("STRIPE_PUBLISHABLE_KEY").ok(),
             stripe_webhook_secret: env::var("STRIPE_WEBHOOK_SECRET").ok(),
+
+            base_domain: env::var("BASE_DOMAIN").ok(),
+            ssl_provider_endpoint: env::var("SSL_PROVIDER_ENDPOINT").ok(),
+            ssl_provider_api_key: env::var("SSL_PROVIDER_API_KEY").ok(),
+            auto_provision_ssl: env::var("AUTO_PROVISION_SSL")
+                .ok()
+                .and_then(|s| s.parse().ok()),
+            ssl_webhook_url: env::var("SSL_WEBHOOK_URL").ok(),
         })
     }
 

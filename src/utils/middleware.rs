@@ -6,6 +6,8 @@ use axum::{
     response::Response,
     body::Body,
 };
+use serde::{Deserialize, Serialize};
+use async_trait::async_trait;
 use governor::{
     clock::DefaultClock,
     state::{InMemoryState, NotKeyed, keyed::DashMapStateStore},
@@ -287,6 +289,97 @@ impl Default for RateLimitConfig {
             requests_per_minute: 60,
             burst_size: 10,
         }
+    }
+}
+
+/// Domain-based routing middleware
+pub async fn domain_routing_middleware(
+    State(app_state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    mut request: Request<Body>,
+    next: Next<Body>,
+) -> Result<Response, AppError> {
+    // Extract the host header
+    if let Some(host_header) = headers.get("host") {
+        if let Ok(host_str) = host_header.to_str() {
+            // Clean the host (remove port if present)
+            let host = host_str.split(':').next().unwrap_or(host_str);
+            
+            debug!("Processing request for host: {}", host);
+            
+            // Check if this is a custom domain or subdomain
+            if let Some(publication_id) = app_state.domain_service.find_publication_by_domain(host).await.unwrap_or(None) {
+                debug!("Found publication {} for domain {}", publication_id, host);
+                
+                // Get publication details
+                match app_state.publication_service.get_publication(&publication_id).await {
+                    Ok(Some(publication)) => {
+                        // Add publication context to request extensions
+                        request.extensions_mut().insert(PublicationContext {
+                            publication_id: publication_id.clone(),
+                            publication: publication.clone(),
+                            domain: host.to_string(),
+                            is_custom_domain: !host.contains(&app_state.config.base_domain.clone().unwrap_or_default()),
+                        });
+                        
+                        debug!("Added publication context for {}", publication.name);
+                    }
+                    Ok(None) => {
+                        debug!("Publication {} not found", publication_id);
+                    }
+                    Err(e) => {
+                        warn!("Failed to fetch publication {}: {}", publication_id, e);
+                    }
+                }
+            } else {
+                debug!("No publication found for domain {}", host);
+            }
+        }
+    }
+
+    Ok(next.run(request).await)
+}
+
+/// Publication context for domain-based routing
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PublicationContext {
+    pub publication_id: String,
+    pub publication: crate::models::publication::Publication,
+    pub domain: String,
+    pub is_custom_domain: bool,
+}
+
+/// Extractor for optional publication context
+pub struct OptionalPublicationContext(pub Option<PublicationContext>);
+
+#[async_trait::async_trait]
+impl<S> axum::extract::FromRequestParts<S> for OptionalPublicationContext
+where
+    S: Send + Sync,
+{
+    type Rejection = AppError;
+
+    async fn from_request_parts(parts: &mut axum::http::request::Parts, _state: &S) -> Result<Self, Self::Rejection> {
+        let context = parts.extensions.get::<PublicationContext>().cloned();
+        Ok(OptionalPublicationContext(context))
+    }
+}
+
+/// Extractor for required publication context
+pub struct RequiredPublicationContext(pub PublicationContext);
+
+#[async_trait::async_trait]
+impl<S> axum::extract::FromRequestParts<S> for RequiredPublicationContext
+where
+    S: Send + Sync,
+{
+    type Rejection = AppError;
+
+    async fn from_request_parts(parts: &mut axum::http::request::Parts, _state: &S) -> Result<Self, Self::Rejection> {
+        let context = parts.extensions.get::<PublicationContext>()
+            .cloned()
+            .ok_or_else(|| AppError::BadRequest("Publication context required for this endpoint".to_string()))?;
+        Ok(RequiredPublicationContext(context))
     }
 }
 

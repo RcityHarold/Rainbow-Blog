@@ -14,3 +14,8 @@ pub mod series;
 pub mod analytics;
 pub mod subscriptions;
 pub mod payments;
+pub mod revenue;
+pub mod stripe;
+pub mod websocket;
+pub mod domain;
+pub mod publication_content;

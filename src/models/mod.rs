@@ -13,6 +13,10 @@ pub mod recommendation;
 pub mod analytics;
 pub mod subscription;
 pub mod payment;
+pub mod revenue;
+pub mod stripe;
+pub mod websocket;
+pub mod domain;
 pub mod response;
 
 // 重新导出常用类型
@@ -31,4 +35,8 @@ pub use recommendation::*;
 pub use analytics::*;
 pub use subscription::*;
 pub use payment::*;
+pub use revenue::*;
+pub use stripe::*;
+pub use websocket::*;
+pub use domain::*;
 pub use response::*;

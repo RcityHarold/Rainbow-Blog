@@ -15,6 +15,11 @@ pub mod series;
 pub mod analytics;
 pub mod subscription;
 pub mod payment;
+pub mod revenue;
+pub mod stripe;
+pub mod websocket;
+pub mod realtime;
+pub mod domain;
 
 // 重新导出常用类型
 pub use database::Database;
@@ -34,3 +39,8 @@ pub use series::SeriesService;
 pub use analytics::AnalyticsService;
 pub use subscription::SubscriptionService;
 pub use payment::PaymentService;
+pub use revenue::RevenueService;
+pub use stripe::StripeService;
+pub use websocket::WebSocketService;
+pub use realtime::RealtimeService;
+pub use domain::{DomainService, DomainConfig};

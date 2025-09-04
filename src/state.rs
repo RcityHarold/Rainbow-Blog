@@ -18,6 +18,11 @@ use crate::{
         analytics::AnalyticsService,
         subscription::SubscriptionService,
         payment::PaymentService,
+        revenue::RevenueService,
+        stripe::StripeService,
+        websocket::WebSocketService,
+        realtime::RealtimeService,
+        domain::{DomainService, DomainConfig},
     },
 };
 
@@ -78,6 +83,21 @@ pub struct AppState {
     
     /// 付费内容服务
     pub payment_service: PaymentService,
+    
+    /// 收益管理服务
+    pub revenue_service: RevenueService,
+    
+    /// Stripe支付服务
+    pub stripe_service: StripeService,
+    
+    /// WebSocket实时通知服务
+    pub websocket_service: WebSocketService,
+    
+    /// 实时通知集成服务
+    pub realtime_service: RealtimeService,
+    
+    /// 域名管理服务
+    pub domain_service: DomainService,
 }
 
 impl Default for AppState {

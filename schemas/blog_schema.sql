@@ -352,7 +352,7 @@ DEFINE FIELD plan_id ON subscription TYPE record(subscription_plan) ASSERT $valu
 DEFINE FIELD creator_id ON subscription TYPE string ASSERT $value != NONE;
 DEFINE FIELD status ON subscription TYPE string DEFAULT "active" ASSERT $value INSIDE ["active", "canceled", "expired", "past_due"];
 DEFINE FIELD started_at ON subscription TYPE datetime DEFAULT time::now();
-DEFINE FIELD current_period_end ON subscription TYPE datetime ASSERT $value != NONE;
+DEFINE FIELD current_period_end ON subscription TYPE datetime DEFAULT time::now();
 DEFINE FIELD canceled_at ON subscription TYPE option<datetime>;
 DEFINE FIELD stripe_subscription_id ON subscription TYPE option<string>; -- 支付平台ID
 DEFINE FIELD created_at ON subscription TYPE datetime DEFAULT time::now();
@@ -363,6 +363,269 @@ DEFINE INDEX subscription_subscriber_idx ON subscription COLUMNS subscriber_id;
 DEFINE INDEX subscription_creator_idx ON subscription COLUMNS creator_id;
 DEFINE INDEX subscription_status_idx ON subscription COLUMNS status;
 DEFINE INDEX subscription_stripe_idx ON subscription COLUMNS stripe_subscription_id;
+
+-- =====================================
+-- 第四阶段：会员和付费系统扩展
+-- =====================================
+
+-- 付费文章访问记录表
+DEFINE TABLE paid_content_access SCHEMAFULL;
+DEFINE FIELD id ON paid_content_access TYPE record(paid_content_access);
+DEFINE FIELD user_id ON paid_content_access TYPE string ASSERT $value != NONE;
+DEFINE FIELD article_id ON paid_content_access TYPE record(article) ASSERT $value != NONE;
+DEFINE FIELD access_type ON paid_content_access TYPE string ASSERT $value INSIDE ["subscription", "one_time_purchase"];
+DEFINE FIELD payment_id ON paid_content_access TYPE option<string>; -- 关联支付记录ID
+DEFINE FIELD expires_at ON paid_content_access TYPE option<datetime>; -- 访问过期时间
+DEFINE FIELD created_at ON paid_content_access TYPE datetime DEFAULT time::now();
+
+-- 付费内容访问索引
+DEFINE INDEX paid_content_access_user_article_idx ON paid_content_access COLUMNS user_id, article_id;
+DEFINE INDEX paid_content_access_user_idx ON paid_content_access COLUMNS user_id;
+DEFINE INDEX paid_content_access_article_idx ON paid_content_access COLUMNS article_id;
+
+-- 一次性购买记录表
+DEFINE TABLE one_time_purchase SCHEMAFULL;
+DEFINE FIELD id ON one_time_purchase TYPE record(one_time_purchase);
+DEFINE FIELD buyer_id ON one_time_purchase TYPE string ASSERT $value != NONE;
+DEFINE FIELD article_id ON one_time_purchase TYPE record(article) ASSERT $value != NONE;
+DEFINE FIELD creator_id ON one_time_purchase TYPE string ASSERT $value != NONE;
+DEFINE FIELD amount ON one_time_purchase TYPE number ASSERT $value > 0; -- 金额（美分）
+DEFINE FIELD currency ON one_time_purchase TYPE string DEFAULT "USD";
+DEFINE FIELD payment_status ON one_time_purchase TYPE string DEFAULT "pending" ASSERT $value INSIDE ["pending", "completed", "failed", "refunded"];
+DEFINE FIELD stripe_payment_intent_id ON one_time_purchase TYPE option<string>;
+DEFINE FIELD completed_at ON one_time_purchase TYPE option<datetime>;
+DEFINE FIELD created_at ON one_time_purchase TYPE datetime DEFAULT time::now();
+DEFINE FIELD updated_at ON one_time_purchase TYPE datetime DEFAULT time::now();
+
+-- 一次性购买索引
+DEFINE INDEX one_time_purchase_buyer_idx ON one_time_purchase COLUMNS buyer_id;
+DEFINE INDEX one_time_purchase_article_idx ON one_time_purchase COLUMNS article_id;
+DEFINE INDEX one_time_purchase_creator_idx ON one_time_purchase COLUMNS creator_id;
+DEFINE INDEX one_time_purchase_status_idx ON one_time_purchase COLUMNS payment_status;
+
+-- 作者收益记录表
+DEFINE TABLE creator_earning SCHEMAFULL;
+DEFINE FIELD id ON creator_earning TYPE record(creator_earning);
+DEFINE FIELD creator_id ON creator_earning TYPE string ASSERT $value != NONE;
+DEFINE FIELD source_type ON creator_earning TYPE string ASSERT $value INSIDE ["subscription", "one_time_purchase", "tip"];
+DEFINE FIELD source_id ON creator_earning TYPE string ASSERT $value != NONE; -- 来源记录ID
+DEFINE FIELD gross_amount ON creator_earning TYPE number ASSERT $value > 0; -- 总金额
+DEFINE FIELD platform_fee ON creator_earning TYPE number DEFAULT 0; -- 平台费用
+DEFINE FIELD processing_fee ON creator_earning TYPE number DEFAULT 0; -- 处理费用
+DEFINE FIELD net_amount ON creator_earning TYPE number ASSERT $value >= 0; -- 净收入
+DEFINE FIELD currency ON creator_earning TYPE string DEFAULT "USD";
+DEFINE FIELD payout_status ON creator_earning TYPE string DEFAULT "pending" ASSERT $value INSIDE ["pending", "paid", "failed"];
+DEFINE FIELD payout_date ON creator_earning TYPE option<datetime>;
+DEFINE FIELD article_id ON creator_earning TYPE option<record(article)>; -- 关联文章（如果适用）
+DEFINE FIELD created_at ON creator_earning TYPE datetime DEFAULT time::now();
+DEFINE FIELD updated_at ON creator_earning TYPE datetime DEFAULT time::now();
+
+-- 收益记录索引
+DEFINE INDEX creator_earning_creator_idx ON creator_earning COLUMNS creator_id;
+DEFINE INDEX creator_earning_source_idx ON creator_earning COLUMNS source_type, source_id;
+DEFINE INDEX creator_earning_status_idx ON creator_earning COLUMNS payout_status;
+DEFINE INDEX creator_earning_date_idx ON creator_earning COLUMNS created_at;
+
+-- 收益汇总表（按月统计）
+DEFINE TABLE creator_earning_summary SCHEMAFULL;
+DEFINE FIELD id ON creator_earning_summary TYPE record(creator_earning_summary);
+DEFINE FIELD creator_id ON creator_earning_summary TYPE string ASSERT $value != NONE;
+DEFINE FIELD year ON creator_earning_summary TYPE number ASSERT $value > 0;
+DEFINE FIELD month ON creator_earning_summary TYPE number ASSERT $value >= 1 AND $value <= 12;
+DEFINE FIELD total_gross ON creator_earning_summary TYPE number DEFAULT 0;
+DEFINE FIELD total_platform_fee ON creator_earning_summary TYPE number DEFAULT 0;
+DEFINE FIELD total_processing_fee ON creator_earning_summary TYPE number DEFAULT 0;
+DEFINE FIELD total_net ON creator_earning_summary TYPE number DEFAULT 0;
+DEFINE FIELD subscription_earnings ON creator_earning_summary TYPE number DEFAULT 0;
+DEFINE FIELD purchase_earnings ON creator_earning_summary TYPE number DEFAULT 0;
+DEFINE FIELD tip_earnings ON creator_earning_summary TYPE number DEFAULT 0;
+DEFINE FIELD currency ON creator_earning_summary TYPE string DEFAULT "USD";
+DEFINE FIELD created_at ON creator_earning_summary TYPE datetime DEFAULT time::now();
+DEFINE FIELD updated_at ON creator_earning_summary TYPE datetime DEFAULT time::now();
+
+-- 收益汇总索引
+DEFINE INDEX creator_earning_summary_creator_period_idx ON creator_earning_summary COLUMNS creator_id, year, month UNIQUE;
+DEFINE INDEX creator_earning_summary_period_idx ON creator_earning_summary COLUMNS year, month;
+
+-- =====================================
+-- Stripe 集成系统
+-- =====================================
+
+-- Stripe客户表
+DEFINE TABLE stripe_customer SCHEMAFULL;
+DEFINE FIELD id ON stripe_customer TYPE record(stripe_customer);
+DEFINE FIELD user_id ON stripe_customer TYPE string ASSERT $value != NONE;
+DEFINE FIELD stripe_customer_id ON stripe_customer TYPE string ASSERT $value != NONE;
+DEFINE FIELD email ON stripe_customer TYPE string ASSERT $value != NONE;
+DEFINE FIELD name ON stripe_customer TYPE option<string>;
+DEFINE FIELD default_payment_method ON stripe_customer TYPE option<string>;
+DEFINE FIELD created_at ON stripe_customer TYPE datetime DEFAULT time::now();
+DEFINE FIELD updated_at ON stripe_customer TYPE datetime DEFAULT time::now();
+
+-- Stripe客户索引
+DEFINE INDEX stripe_customer_user_idx ON stripe_customer COLUMNS user_id UNIQUE;
+DEFINE INDEX stripe_customer_stripe_id_idx ON stripe_customer COLUMNS stripe_customer_id UNIQUE;
+
+-- Stripe支付意图表
+DEFINE TABLE payment_intent SCHEMAFULL;
+DEFINE FIELD id ON payment_intent TYPE record(payment_intent);
+DEFINE FIELD stripe_payment_intent_id ON payment_intent TYPE string ASSERT $value != NONE;
+DEFINE FIELD user_id ON payment_intent TYPE string ASSERT $value != NONE;
+DEFINE FIELD amount ON payment_intent TYPE number ASSERT $value > 0;
+DEFINE FIELD currency ON payment_intent TYPE string DEFAULT "USD";
+DEFINE FIELD status ON payment_intent TYPE string ASSERT $value INSIDE ["requires_payment_method", "requires_confirmation", "requires_action", "processing", "succeeded", "canceled"];
+DEFINE FIELD payment_method_id ON payment_intent TYPE option<string>;
+DEFINE FIELD article_id ON payment_intent TYPE option<record(article)>;
+DEFINE FIELD metadata ON payment_intent TYPE object DEFAULT {};
+DEFINE FIELD created_at ON payment_intent TYPE datetime DEFAULT time::now();
+DEFINE FIELD updated_at ON payment_intent TYPE datetime DEFAULT time::now();
+
+-- 支付意图索引
+DEFINE INDEX payment_intent_stripe_id_idx ON payment_intent COLUMNS stripe_payment_intent_id UNIQUE;
+DEFINE INDEX payment_intent_user_idx ON payment_intent COLUMNS user_id;
+DEFINE INDEX payment_intent_status_idx ON payment_intent COLUMNS status;
+
+-- Stripe订阅表
+DEFINE TABLE stripe_subscription SCHEMAFULL;
+DEFINE FIELD id ON stripe_subscription TYPE record(stripe_subscription);
+DEFINE FIELD subscription_id ON stripe_subscription TYPE string ASSERT $value != NONE; -- 内部订阅ID
+DEFINE FIELD stripe_subscription_id ON stripe_subscription TYPE string ASSERT $value != NONE;
+DEFINE FIELD stripe_customer_id ON stripe_subscription TYPE string ASSERT $value != NONE;
+DEFINE FIELD stripe_price_id ON stripe_subscription TYPE string ASSERT $value != NONE;
+DEFINE FIELD status ON stripe_subscription TYPE string ASSERT $value INSIDE ["active", "past_due", "unpaid", "canceled", "incomplete", "incomplete_expired", "trialing", "paused"];
+DEFINE FIELD current_period_start ON stripe_subscription TYPE datetime;
+DEFINE FIELD current_period_end ON stripe_subscription TYPE datetime;
+DEFINE FIELD cancel_at_period_end ON stripe_subscription TYPE bool DEFAULT false;
+DEFINE FIELD canceled_at ON stripe_subscription TYPE option<datetime>;
+DEFINE FIELD trial_start ON stripe_subscription TYPE option<datetime>;
+DEFINE FIELD trial_end ON stripe_subscription TYPE option<datetime>;
+DEFINE FIELD created_at ON stripe_subscription TYPE datetime DEFAULT time::now();
+DEFINE FIELD updated_at ON stripe_subscription TYPE datetime DEFAULT time::now();
+
+-- Stripe订阅索引
+DEFINE INDEX stripe_subscription_stripe_id_idx ON stripe_subscription COLUMNS stripe_subscription_id UNIQUE;
+DEFINE INDEX stripe_subscription_internal_id_idx ON stripe_subscription COLUMNS subscription_id;
+DEFINE INDEX stripe_subscription_customer_idx ON stripe_subscription COLUMNS stripe_customer_id;
+DEFINE INDEX stripe_subscription_status_idx ON stripe_subscription COLUMNS status;
+
+-- Webhook事件表
+DEFINE TABLE webhook_event SCHEMAFULL;
+DEFINE FIELD id ON webhook_event TYPE record(webhook_event);
+DEFINE FIELD stripe_event_id ON webhook_event TYPE string ASSERT $value != NONE;
+DEFINE FIELD event_type ON webhook_event TYPE string ASSERT $value != NONE;
+DEFINE FIELD processed ON webhook_event TYPE bool DEFAULT false;
+DEFINE FIELD processed_at ON webhook_event TYPE option<datetime>;
+DEFINE FIELD data ON webhook_event TYPE object;
+DEFINE FIELD created_at ON webhook_event TYPE datetime DEFAULT time::now();
+
+-- Webhook事件索引
+DEFINE INDEX webhook_event_stripe_id_idx ON webhook_event COLUMNS stripe_event_id UNIQUE;
+DEFINE INDEX webhook_event_type_idx ON webhook_event COLUMNS event_type;
+DEFINE INDEX webhook_event_processed_idx ON webhook_event COLUMNS processed;
+
+-- =====================================
+-- WebSocket 实时通知系统
+-- =====================================
+
+-- WebSocket连接表
+DEFINE TABLE websocket_connection SCHEMAFULL;
+DEFINE FIELD id ON websocket_connection TYPE record(websocket_connection);
+DEFINE FIELD connection_id ON websocket_connection TYPE string ASSERT $value != NONE;
+DEFINE FIELD user_id ON websocket_connection TYPE string ASSERT $value != NONE;
+DEFINE FIELD connected_at ON websocket_connection TYPE datetime DEFAULT time::now();
+DEFINE FIELD last_ping_at ON websocket_connection TYPE datetime DEFAULT time::now();
+DEFINE FIELD user_agent ON websocket_connection TYPE option<string>;
+DEFINE FIELD ip_address ON websocket_connection TYPE option<string>;
+DEFINE FIELD is_active ON websocket_connection TYPE bool DEFAULT true;
+
+-- WebSocket连接索引
+DEFINE INDEX websocket_connection_id_idx ON websocket_connection COLUMNS connection_id UNIQUE;
+DEFINE INDEX websocket_connection_user_idx ON websocket_connection COLUMNS user_id;
+DEFINE INDEX websocket_connection_active_idx ON websocket_connection COLUMNS is_active;
+
+-- 通知配置表
+DEFINE TABLE notification_config SCHEMAFULL;
+DEFINE FIELD id ON notification_config TYPE record(notification_config);
+DEFINE FIELD user_id ON notification_config TYPE string ASSERT $value != NONE;
+DEFINE FIELD email_notifications ON notification_config TYPE bool DEFAULT true;
+DEFINE FIELD push_notifications ON notification_config TYPE bool DEFAULT true;
+DEFINE FIELD websocket_notifications ON notification_config TYPE bool DEFAULT true;
+DEFINE FIELD notification_types ON notification_config TYPE array<string> DEFAULT ["new_article", "new_comment", "new_follower", "article_clap", "subscription_update", "payment_update"];
+DEFINE FIELD quiet_hours_start ON notification_config TYPE option<string>; -- "22:00"格式
+DEFINE FIELD quiet_hours_end ON notification_config TYPE option<string>; -- "08:00"格式
+DEFINE FIELD timezone ON notification_config TYPE string DEFAULT "UTC";
+DEFINE FIELD created_at ON notification_config TYPE datetime DEFAULT time::now();
+DEFINE FIELD updated_at ON notification_config TYPE datetime DEFAULT time::now();
+
+-- 通知配置索引
+DEFINE INDEX notification_config_user_idx ON notification_config COLUMNS user_id UNIQUE;
+
+-- =====================================
+-- 域名绑定系统
+-- =====================================
+
+-- 出版物域名表
+DEFINE TABLE publication_domain SCHEMAFULL;
+DEFINE FIELD id ON publication_domain TYPE record(publication_domain);
+DEFINE FIELD publication_id ON publication_domain TYPE record(publication) ASSERT $value != NONE;
+DEFINE FIELD domain_type ON publication_domain TYPE string ASSERT $value INSIDE ["subdomain", "custom"];
+DEFINE FIELD subdomain ON publication_domain TYPE option<string>; -- 子域名（不含主域名）
+DEFINE FIELD custom_domain ON publication_domain TYPE option<string>; -- 完整自定义域名
+DEFINE FIELD status ON publication_domain TYPE string DEFAULT "pending" ASSERT $value INSIDE ["pending", "verifying", "active", "failed"];
+DEFINE FIELD ssl_status ON publication_domain TYPE string DEFAULT "none" ASSERT $value INSIDE ["none", "pending", "active", "expired", "failed"];
+DEFINE FIELD is_primary ON publication_domain TYPE bool DEFAULT false; -- 是否为主域名
+DEFINE FIELD verification_token ON publication_domain TYPE option<string>; -- DNS验证令牌
+DEFINE FIELD ssl_expires_at ON publication_domain TYPE option<datetime>; -- SSL证书过期时间
+DEFINE FIELD verified_at ON publication_domain TYPE option<datetime>;
+DEFINE FIELD created_at ON publication_domain TYPE datetime DEFAULT time::now();
+DEFINE FIELD updated_at ON publication_domain TYPE datetime DEFAULT time::now();
+
+-- 域名索引
+DEFINE INDEX publication_domain_publication_idx ON publication_domain COLUMNS publication_id;
+DEFINE INDEX publication_domain_subdomain_idx ON publication_domain COLUMNS subdomain UNIQUE;
+DEFINE INDEX publication_domain_custom_domain_idx ON publication_domain COLUMNS custom_domain UNIQUE;
+DEFINE INDEX publication_domain_status_idx ON publication_domain COLUMNS status;
+DEFINE INDEX publication_domain_ssl_status_idx ON publication_domain COLUMNS ssl_status;
+DEFINE INDEX publication_domain_primary_idx ON publication_domain COLUMNS is_primary;
+
+-- 域名验证记录表
+DEFINE TABLE domain_verification_record SCHEMAFULL;
+DEFINE FIELD id ON domain_verification_record TYPE record(domain_verification_record);
+DEFINE FIELD domain_id ON domain_verification_record TYPE record(publication_domain) ASSERT $value != NONE;
+DEFINE FIELD record_type ON domain_verification_record TYPE string ASSERT $value INSIDE ["TXT", "CNAME", "A"];
+DEFINE FIELD record_name ON domain_verification_record TYPE string ASSERT $value != NONE; -- DNS记录名称
+DEFINE FIELD record_value ON domain_verification_record TYPE string ASSERT $value != NONE; -- DNS记录值
+DEFINE FIELD purpose ON domain_verification_record TYPE string ASSERT $value INSIDE ["ownership", "routing", "ssl"];
+DEFINE FIELD is_verified ON domain_verification_record TYPE bool DEFAULT false;
+DEFINE FIELD verified_at ON domain_verification_record TYPE option<datetime>;
+DEFINE FIELD last_check_at ON domain_verification_record TYPE option<datetime>;
+DEFINE FIELD created_at ON domain_verification_record TYPE datetime DEFAULT time::now();
+
+-- 验证记录索引
+DEFINE INDEX domain_verification_record_domain_idx ON domain_verification_record COLUMNS domain_id;
+DEFINE INDEX domain_verification_record_purpose_idx ON domain_verification_record COLUMNS purpose;
+DEFINE INDEX domain_verification_record_verified_idx ON domain_verification_record COLUMNS is_verified;
+
+-- SSL证书信息表
+DEFINE TABLE ssl_certificate_info SCHEMAFULL;
+DEFINE FIELD id ON ssl_certificate_info TYPE record(ssl_certificate_info);
+DEFINE FIELD domain_id ON ssl_certificate_info TYPE record(publication_domain) ASSERT $value != NONE;
+DEFINE FIELD provider ON ssl_certificate_info TYPE string; -- SSL证书提供商
+DEFINE FIELD certificate_id ON ssl_certificate_info TYPE string; -- 证书ID
+DEFINE FIELD issued_at ON ssl_certificate_info TYPE datetime;
+DEFINE FIELD expires_at ON ssl_certificate_info TYPE datetime;
+DEFINE FIELD auto_renew ON ssl_certificate_info TYPE bool DEFAULT true;
+DEFINE FIELD renewal_attempts ON ssl_certificate_info TYPE number DEFAULT 0;
+DEFINE FIELD last_renewal_attempt ON ssl_certificate_info TYPE option<datetime>;
+DEFINE FIELD status ON ssl_certificate_info TYPE string ASSERT $value INSIDE ["active", "expired", "failed", "pending"];
+DEFINE FIELD created_at ON ssl_certificate_info TYPE datetime DEFAULT time::now();
+DEFINE FIELD updated_at ON ssl_certificate_info TYPE datetime DEFAULT time::now();
+
+-- SSL证书索引
+DEFINE INDEX ssl_certificate_info_domain_idx ON ssl_certificate_info COLUMNS domain_id UNIQUE;
+DEFINE INDEX ssl_certificate_info_expires_idx ON ssl_certificate_info COLUMNS expires_at;
+DEFINE INDEX ssl_certificate_info_status_idx ON ssl_certificate_info COLUMNS status;
+DEFINE INDEX ssl_certificate_info_auto_renew_idx ON ssl_certificate_info COLUMNS auto_renew;
 
 -- =====================================
 -- 通知系统
@@ -467,6 +730,10 @@ INSERT INTO tag (name, slug, description, is_featured) VALUES
     ("AI", "ai", "Artificial Intelligence and ML", true),
     ("Startup", "startup", "Startup ecosystem and advice", true);
 
+-- 预留子域名（不可注册）
+-- 注意：这些在实际应用中应该通过配置文件或环境变量管理
+-- 这里仅作为示例数据
+
 -- =====================================
 -- 存储过程和触发器（SurrealDB特有）
 -- =====================================
@@ -533,4 +800,156 @@ DEFINE FUNCTION fn::calculate_popularity_score($article_id: record(article)) {
     LET $time_factor = math::max(0.5, 1 - ($age_days / 30));
     
     RETURN $score * $time_factor;
+};
+
+-- 更新创作者收益汇总的函数
+DEFINE FUNCTION fn::update_creator_earnings_summary($creator_id: string, $year: number, $month: number) {
+    -- 计算指定月份的收益汇总
+    LET $earnings = (
+        SELECT 
+            math::sum(gross_amount) AS total_gross,
+            math::sum(platform_fee) AS total_platform_fee,
+            math::sum(processing_fee) AS total_processing_fee,
+            math::sum(net_amount) AS total_net,
+            math::sum(CASE WHEN source_type = 'subscription' THEN net_amount ELSE 0 END) AS subscription_earnings,
+            math::sum(CASE WHEN source_type = 'one_time_purchase' THEN net_amount ELSE 0 END) AS purchase_earnings,
+            math::sum(CASE WHEN source_type = 'tip' THEN net_amount ELSE 0 END) AS tip_earnings
+        FROM creator_earning 
+        WHERE creator_id = $creator_id 
+        AND time::year(created_at) = $year 
+        AND time::month(created_at) = $month
+    );
+    
+    -- 更新或插入汇总记录
+    UPDATE creator_earning_summary SET 
+        total_gross = $earnings.total_gross,
+        total_platform_fee = $earnings.total_platform_fee,
+        total_processing_fee = $earnings.total_processing_fee,
+        total_net = $earnings.total_net,
+        subscription_earnings = $earnings.subscription_earnings,
+        purchase_earnings = $earnings.purchase_earnings,
+        tip_earnings = $earnings.tip_earnings,
+        updated_at = time::now()
+    WHERE creator_id = $creator_id AND year = $year AND month = $month;
+    
+    -- 如果不存在则创建新记录
+    IF (SELECT count() FROM creator_earning_summary WHERE creator_id = $creator_id AND year = $year AND month = $month) = 0 {
+        INSERT INTO creator_earning_summary {
+            creator_id: $creator_id,
+            year: $year,
+            month: $month,
+            total_gross: $earnings.total_gross,
+            total_platform_fee: $earnings.total_platform_fee,
+            total_processing_fee: $earnings.total_processing_fee,
+            total_net: $earnings.total_net,
+            subscription_earnings: $earnings.subscription_earnings,
+            purchase_earnings: $earnings.purchase_earnings,
+            tip_earnings: $earnings.tip_earnings,
+            currency: 'USD'
+        };
+    };
+};
+
+-- 检查用户是否有权限访问付费内容的函数
+DEFINE FUNCTION fn::check_paid_content_access($user_id: string, $article_id: record(article)) {
+    LET $article = (SELECT * FROM article WHERE id = $article_id);
+    
+    -- 如果不是付费内容，直接返回true
+    IF !$article.is_paid_content {
+        RETURN true;
+    };
+    
+    -- 检查是否是作者本人
+    IF $article.author_id = $user_id {
+        RETURN true;
+    };
+    
+    -- 检查订阅状态
+    LET $subscription = (
+        SELECT * FROM subscription 
+        WHERE subscriber_id = $user_id 
+        AND creator_id = $article.author_id 
+        AND status = 'active'
+        AND current_period_end > time::now()
+    );
+    
+    IF count($subscription) > 0 {
+        RETURN true;
+    };
+    
+    -- 检查一次性购买
+    LET $purchase = (
+        SELECT * FROM paid_content_access 
+        WHERE user_id = $user_id 
+        AND article_id = $article_id
+        AND (expires_at IS NULL OR expires_at > time::now())
+    );
+    
+    IF count($purchase) > 0 {
+        RETURN true;
+    };
+    
+    RETURN false;
+};
+
+-- 计算平台费用的函数
+DEFINE FUNCTION fn::calculate_platform_fees($amount: number) {
+    LET $platform_fee_rate = 0.10; -- 平台费用 10%
+    LET $processing_fee_rate = 0.029; -- 处理费用 2.9%
+    
+    LET $platform_fee = math::floor($amount * $platform_fee_rate);
+    LET $processing_fee = math::floor($amount * $processing_fee_rate);
+    LET $net_amount = $amount - $platform_fee - $processing_fee;
+    
+    RETURN {
+        gross_amount: $amount,
+        platform_fee: $platform_fee,
+        processing_fee: $processing_fee,
+        net_amount: $net_amount
+    };
+};
+
+-- 域名验证状态检查函数
+DEFINE FUNCTION fn::check_domain_verification($domain_id: record(publication_domain)) {
+    LET $required_records = (
+        SELECT * FROM domain_verification_record 
+        WHERE domain_id = $domain_id 
+        AND purpose IN ['ownership', 'routing']
+    );
+    
+    LET $verified_count = (
+        SELECT count() FROM domain_verification_record 
+        WHERE domain_id = $domain_id 
+        AND purpose IN ['ownership', 'routing'] 
+        AND is_verified = true
+    );
+    
+    LET $total_count = count($required_records);
+    
+    IF $verified_count = $total_count AND $total_count > 0 {
+        -- 所有必需记录都已验证，更新域名状态
+        UPDATE publication_domain SET 
+            status = 'active',
+            verified_at = time::now(),
+            updated_at = time::now()
+        WHERE id = $domain_id;
+        
+        RETURN 'verified';
+    } ELSE IF $verified_count > 0 {
+        -- 部分验证
+        UPDATE publication_domain SET 
+            status = 'verifying',
+            updated_at = time::now()
+        WHERE id = $domain_id;
+        
+        RETURN 'partial';
+    } ELSE {
+        -- 未验证
+        UPDATE publication_domain SET 
+            status = 'pending',
+            updated_at = time::now()
+        WHERE id = $domain_id;
+        
+        RETURN 'pending';
+    };
 };
