@@ -237,7 +237,7 @@ impl AnalyticsService {
             LEFT JOIN (
                 SELECT 
                     DATE(created_at) as follow_date,
-                    COUNT(*) as new_followers
+                    count() as new_followers
                 FROM user_follows
                 WHERE following_id = $user_id
                 AND created_at >= $start_date
@@ -500,7 +500,7 @@ impl AnalyticsService {
     // Helper methods
 
     async fn get_follower_count(&self, user_id: &str) -> Result<i64> {
-        let query = "SELECT COUNT(*) as count FROM follow WHERE following_id = $user_id";
+        let query = "SELECT count() as count FROM follow WHERE following_id = $user_id";
         let mut response = self.db.query_with_params(query, json!({"user_id": user_id})).await?;
         let result: Vec<Value> = response.take(0)?;
         Ok(result.first()
@@ -509,7 +509,7 @@ impl AnalyticsService {
     }
 
     async fn get_following_count(&self, user_id: &str) -> Result<i64> {
-        let query = "SELECT COUNT(*) as count FROM follow WHERE follower_id = $user_id";
+        let query = "SELECT count() as count FROM follow WHERE follower_id = $user_id";
         let mut response = self.db.query_with_params(query, json!({"user_id": user_id})).await?;
         let result: Vec<Value> = response.take(0)?;
         Ok(result.first()

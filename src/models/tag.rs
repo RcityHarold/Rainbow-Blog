@@ -1,9 +1,11 @@
 use serde::{Deserialize, Serialize};
 use chrono::{DateTime, Utc};
 use validator::Validate;
+use crate::utils::serde_helpers::thing_id;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Tag {
+    #[serde(with = "thing_id")]
     pub id: String,
     pub name: String,
     pub slug: String,
@@ -34,16 +36,22 @@ pub struct UpdateTagRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ArticleTag {
+    #[serde(with = "thing_id")]
     pub id: String,
+    #[serde(with = "thing_id")]
     pub article_id: String,
+    #[serde(with = "thing_id")]
     pub tag_id: String,
     pub created_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UserTagFollow {
+    #[serde(with = "thing_id")]
     pub id: String,
+    #[serde(with = "thing_id")]
     pub user_id: String,
+    #[serde(with = "thing_id")]
     pub tag_id: String,
     pub created_at: DateTime<Utc>,
 }

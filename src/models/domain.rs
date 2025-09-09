@@ -65,7 +65,7 @@ pub struct PublicationDomain {
 }
 
 /// DNS verification record for custom domains
-#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DomainVerificationRecord {
     pub id: Uuid,
     pub domain_id: Uuid,
@@ -158,7 +158,7 @@ pub struct CheckDomainAvailabilityRequest {
 }
 
 /// Domain statistics
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct DomainStats {
     pub total_domains: i64,
     pub active_domains: i64,

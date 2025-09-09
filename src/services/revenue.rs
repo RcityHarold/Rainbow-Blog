@@ -207,7 +207,7 @@ impl RevenueService {
             SELECT 
                 source_type,
                 SUM(amount) as total_amount,
-                COUNT(*) as count
+                count() as count
             FROM revenue
             WHERE 
                 creator_id = $creator_id AND
@@ -280,7 +280,7 @@ impl RevenueService {
     ) -> Result<(i32, i32)> {
         // 新增订阅数
         let new_query = r#"
-            SELECT COUNT(*) as count
+            SELECT count() as count
             FROM subscription
             WHERE 
                 creator_id = $creator_id AND
@@ -302,7 +302,7 @@ impl RevenueService {
 
         // 取消订阅数
         let cancelled_query = r#"
-            SELECT COUNT(*) as count
+            SELECT count() as count
             FROM subscription
             WHERE 
                 creator_id = $creator_id AND

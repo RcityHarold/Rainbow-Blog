@@ -32,6 +32,10 @@ pub async fn auth_middleware(
     mut request: Request<Body>,
     next: Next<Body>,
 ) -> Result<Response, AppError> {
+    // 将认证服务和用户服务添加到请求扩展中，供后续处理器使用
+    request.extensions_mut().insert(app_state.auth_service.clone());
+    request.extensions_mut().insert(app_state.user_service.clone());
+    
     // 检查是否有 Authorization 头
     if let Some(auth_header) = headers.get("authorization") {
         if let Ok(auth_str) = auth_header.to_str() {
@@ -45,6 +49,22 @@ pub async fn auth_middleware(
                         match app_state.auth_service.get_user_from_rainbow_auth(&claims.sub, token).await {
                             Ok(user) => {
                                 debug!("Authenticated user: {} ({})", user.id, user.email);
+                                
+                                // 确保用户的 profile 存在
+                                let profile_result = app_state.user_service.get_or_create_profile(
+                                    &user.id,
+                                    &user.email,
+                                    user.is_verified,
+                                    user.username.clone(),
+                                    user.display_name.clone(),
+                                ).await;
+                                
+                                if let Err(e) = profile_result {
+                                    warn!("Failed to ensure user profile exists for user {}: {}", user.id, e);
+                                } else {
+                                    debug!("Successfully ensured user profile exists for user {}", user.id);
+                                }
+                                
                                 // 将用户信息添加到请求中
                                 request.extensions_mut().insert(user);
                             }
@@ -312,17 +332,17 @@ pub async fn domain_routing_middleware(
                 debug!("Found publication {} for domain {}", publication_id, host);
                 
                 // Get publication details
-                match app_state.publication_service.get_publication(&publication_id).await {
+                match app_state.publication_service.get_publication(&publication_id, None).await {
                     Ok(Some(publication)) => {
                         // Add publication context to request extensions
                         request.extensions_mut().insert(PublicationContext {
                             publication_id: publication_id.clone(),
-                            publication: publication.clone(),
+                            publication: publication.publication.clone(),
                             domain: host.to_string(),
                             is_custom_domain: !host.contains(&app_state.config.base_domain.clone().unwrap_or_default()),
                         });
                         
-                        debug!("Added publication context for {}", publication.name);
+                        debug!("Added publication context for {}", publication.publication.name);
                     }
                     Ok(None) => {
                         debug!("Publication {} not found", publication_id);

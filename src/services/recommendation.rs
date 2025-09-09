@@ -247,7 +247,7 @@ impl RecommendationService {
     /// 获取用户偏好标签
     async fn get_user_preferred_tags(&self, user_id: &str) -> Result<Vec<TagPreference>> {
         let query = r#"
-            SELECT t.id, t.name, COUNT(*) * 1.0 as weight
+            SELECT t.id, t.name, count() * 1.0 as weight
             FROM tag t
             JOIN article_tag at ON t.id = at.tag_id
             JOIN article a ON at.article_id = a.id
@@ -285,7 +285,7 @@ impl RecommendationService {
     /// 获取用户偏好作者
     async fn get_user_preferred_authors(&self, user_id: &str) -> Result<Vec<AuthorPreference>> {
         let query = r#"
-            SELECT a.author_id, COUNT(*) * 1.0 as weight
+            SELECT a.author_id, count() * 1.0 as weight
             FROM article a
             JOIN clap c ON a.id = c.article_id
             WHERE c.user_id = $user_id
@@ -436,7 +436,7 @@ impl RecommendationService {
     async fn find_similar_users(&self, user_id: &str) -> Result<Vec<String>> {
         // 简化的相似性计算：基于共同点赞的文章
         let query = r#"
-            SELECT c2.user_id, COUNT(*) as common_claps
+            SELECT c2.user_id, count() as common_claps
             FROM clap c1
             JOIN clap c2 ON c1.article_id = c2.article_id
             WHERE c1.user_id = $user_id
@@ -475,7 +475,7 @@ impl RecommendationService {
         }
 
         let query = r#"
-            SELECT DISTINCT a.*, COUNT(*) as popularity
+            SELECT DISTINCT a.*, count() as popularity
             FROM article a
             JOIN clap c ON a.id = c.article_id
             WHERE c.user_id IN $similar_users
@@ -590,7 +590,7 @@ impl RecommendationService {
                     clap_count * 0.3 + 
                     comment_count * 0.4 + 
                     bookmark_count * 0.2 +
-                    (CASE WHEN created_at > $week_ago THEN 20 ELSE 0 END)
+                    IF created_at > $week_ago THEN 20 ELSE 0 END
                 ) as trending_score
             FROM article
             WHERE status = 'published' 
@@ -636,9 +636,10 @@ impl RecommendationService {
     async fn update_user_profiles(&self) -> Result<()> {
         // 获取活跃用户列表
         let query = r#"
-            SELECT DISTINCT user_id
+            SELECT user_id
             FROM user_interaction
             WHERE created_at > $week_ago
+            GROUP BY user_id
         "#;
 
         let mut response = self.db.query_with_params(query, json!({
@@ -682,7 +683,7 @@ impl RecommendationService {
 
         // 计算总交互数
         let total_interactions_query = r#"
-            SELECT COUNT(*) as total
+            SELECT count() as total
             FROM user_interaction
             WHERE user_id = $user_id
         "#;
@@ -722,7 +723,7 @@ impl RecommendationService {
     async fn precompute_recommendations(&self) -> Result<()> {
         // 简化版本：只为最活跃的用户预计算
         let active_users_query = r#"
-            SELECT user_id, COUNT(*) as interaction_count
+            SELECT user_id, count() as interaction_count
             FROM user_interaction
             WHERE created_at > $week_ago
             GROUP BY user_id

@@ -2,23 +2,35 @@ use serde::{Deserialize, Serialize};
 use chrono::{DateTime, Utc};
 use validator::Validate;
 use uuid::Uuid;
+use surrealdb::sql::Thing;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UserProfile {
-    pub id: String,
+    pub id: Thing,
     pub user_id: String, // Rainbow-Auth 用户ID
     pub username: String,
     pub display_name: String,
-    pub email: String, // 从Rainbow-Auth获取的邮箱（用于显示）
-    pub email_verified: bool, // 从Rainbow-Auth获取的邮箱验证状态
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub email: Option<String>, // 从Rainbow-Auth获取的邮箱（不存储在数据库中）
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub email_verified: Option<bool>, // 从Rainbow-Auth获取的邮箱验证状态（不存储在数据库中）
+    #[serde(default)]
     pub bio: Option<String>,
+    #[serde(default)]
     pub avatar_url: Option<String>,
+    #[serde(default)]
     pub cover_image_url: Option<String>,
+    #[serde(default)]
     pub website: Option<String>,
+    #[serde(default)]
     pub location: Option<String>,
+    #[serde(default)]
     pub twitter_username: Option<String>,
+    #[serde(default)]
     pub github_username: Option<String>,
+    #[serde(default)]
     pub linkedin_url: Option<String>,
+    #[serde(default)]
     pub facebook_url: Option<String>,
     pub follower_count: i64,
     pub following_count: i64,
@@ -122,6 +134,7 @@ pub struct UserProfileResponse {
     pub article_count: i64,
     pub total_claps_received: i64,
     pub is_verified: bool,
+    pub is_suspended: bool,
     pub created_at: DateTime<Utc>,
 }
 
@@ -144,15 +157,18 @@ pub struct UserActivitySummary {
 }
 
 impl UserProfile {
-    pub fn new(user_id: String, username: String, display_name: String, email: String) -> Self {
+    pub fn new(user_id: String, username: String, display_name: String) -> Self {
         let now = Utc::now();
         Self {
-            id: Uuid::new_v4().to_string(),
+            id: Thing {
+                tb: "user_profile".to_string(),
+                id: surrealdb::sql::Id::String(Uuid::new_v4().to_string()),
+            },
             user_id,
             username,
             display_name,
-            email,
-            email_verified: false, // 默认未验证
+            email: None,
+            email_verified: None,
             bio: None,
             avatar_url: None,
             cover_image_url: None,
@@ -175,12 +191,12 @@ impl UserProfile {
 
     pub fn to_response(&self) -> UserProfileResponse {
         UserProfileResponse {
-            id: self.id.clone(),
+            id: self.id.id.to_string(),
             user_id: self.user_id.clone(),
             username: self.username.clone(),
             display_name: self.display_name.clone(),
-            email: self.email.clone(),
-            email_verified: self.email_verified,
+            email: self.email.clone().unwrap_or_default(), // 如果没有 email，返回空字符串
+            email_verified: self.email_verified.unwrap_or(false),
             bio: self.bio.clone(),
             avatar_url: self.avatar_url.clone(),
             cover_image_url: self.cover_image_url.clone(),
@@ -195,6 +211,7 @@ impl UserProfile {
             article_count: self.article_count,
             total_claps_received: self.total_claps_received,
             is_verified: self.is_verified,
+            is_suspended: self.is_suspended,
             created_at: self.created_at,
         }
     }
@@ -204,12 +221,15 @@ impl From<CreateUserProfileRequest> for UserProfile {
     fn from(req: CreateUserProfileRequest) -> Self {
         let now = Utc::now();
         Self {
-            id: Uuid::new_v4().to_string(),
+            id: Thing {
+                tb: "user_profile".to_string(),
+                id: surrealdb::sql::Id::String(Uuid::new_v4().to_string()),
+            },
             user_id: String::new(), // 将在服务层设置
             username: req.username,
             display_name: req.display_name,
-            email: String::new(), // 将在服务层设置
-            email_verified: false, // 默认未验证
+            email: None, // 将在服务层设置
+            email_verified: None, // 默认未验证
             bio: req.bio,
             avatar_url: None,
             cover_image_url: None,

@@ -6,10 +6,10 @@ use crate::{
 use chrono::Utc;
 use serde_json::{json, Value};
 use std::sync::Arc;
-use tracing::{debug, info};
+use tracing::{debug, info, error};
 use uuid::Uuid;
 use validator::Validate;
-use soulcore::prelude::Thing;
+use surrealdb::sql::Thing;
 
 /// 用户服务，处理用户相关的业务逻辑
 #[derive(Clone)]
@@ -33,12 +33,17 @@ impl UserService {
         }
 
         // 从邮箱生成用户名
-        let base_username = email.split('@').next()
+        let mut base_username = email.split('@').next()
             .unwrap_or("user")
             .chars()
             .filter(|c| c.is_alphanumeric() || *c == '_' || *c == '-')
             .collect::<String>()
             .to_lowercase();
+            
+        // 确保用户名至少有3个字符
+        if base_username.len() < 3 {
+            base_username = format!("user_{}", base_username);
+        }
             
         let original_username = if base_username.is_empty() {
             format!("user{}", Uuid::new_v4().simple())
@@ -48,12 +53,15 @@ impl UserService {
         
         // 生成唯一用户名
         let mut profile = UserProfile {
-            id: Uuid::new_v4().to_string(),
+            id: Thing {
+                tb: "user_profile".to_string(),
+                id: surrealdb::sql::Id::String(Uuid::new_v4().to_string()),
+            },
             user_id: user_id.to_string(),
             username: original_username.clone(),
             display_name: original_username.clone(),
-            email: email.to_string(), // 添加邮箱字段
-            email_verified: false, // 默认未验证，稍后从Rainbow-Auth获取真实状态
+            email: Some(email.to_string()), // 添加邮箱字段
+            email_verified: Some(false), // 默认未验证，稍后从Rainbow-Auth获取真实状态
             bio: None,
             avatar_url: None,
             cover_image_url: None,
@@ -84,19 +92,79 @@ impl UserService {
             }
         }
 
-        // 创建用户资料
-        let result = self.db.create("user_profile", profile).await?;
+        // 创建用户资料，使用 SurrealDB 的 time::now() 函数
+        let create_query = format!(
+            r#"
+            CREATE user_profile CONTENT {{
+                id: "{}",
+                user_id: "{}",
+                username: "{}",
+                display_name: "{}",
+                email: {},
+                email_verified: {},
+                bio: {},
+                avatar_url: {},
+                cover_image_url: {},
+                website: {},
+                location: {},
+                twitter_username: {},
+                github_username: {},
+                linkedin_url: {},
+                facebook_url: {},
+                follower_count: {},
+                following_count: {},
+                article_count: {},
+                total_claps_received: {},
+                is_verified: {},
+                is_suspended: {},
+                created_at: time::now(),
+                updated_at: time::now()
+            }}
+            "#,
+            profile.id.id.to_string(),
+            profile.user_id,
+            profile.username,
+            profile.display_name,
+            profile.email.as_ref().map(|s| format!("\"{}\"", s)).unwrap_or("NULL".to_string()),
+            profile.email_verified.unwrap_or(false),
+            profile.bio.as_ref().map(|s| format!("\"{}\"", s)).unwrap_or("NULL".to_string()),
+            profile.avatar_url.as_ref().map(|s| format!("\"{}\"", s)).unwrap_or("NULL".to_string()),
+            profile.cover_image_url.as_ref().map(|s| format!("\"{}\"", s)).unwrap_or("NULL".to_string()),
+            profile.website.as_ref().map(|s| format!("\"{}\"", s)).unwrap_or("NULL".to_string()),
+            profile.location.as_ref().map(|s| format!("\"{}\"", s)).unwrap_or("NULL".to_string()),
+            profile.twitter_username.as_ref().map(|s| format!("\"{}\"", s)).unwrap_or("NULL".to_string()),
+            profile.github_username.as_ref().map(|s| format!("\"{}\"", s)).unwrap_or("NULL".to_string()),
+            profile.linkedin_url.as_ref().map(|s| format!("\"{}\"", s)).unwrap_or("NULL".to_string()),
+            profile.facebook_url.as_ref().map(|s| format!("\"{}\"", s)).unwrap_or("NULL".to_string()),
+            profile.follower_count,
+            profile.following_count,
+            profile.article_count,
+            profile.total_claps_received,
+            profile.is_verified,
+            profile.is_suspended,
+        );
         
-        info!("Created new user profile for user: {} with username: {}", user_id, result.username);
+        let mut response = self.db.query(&create_query).await?;
+        let created: Vec<UserProfile> = response.take(0)?;
         
-        Ok(result)
+        if created.is_empty() {
+            error!("No user profile was created for user: {}", user_id);
+            return Err(AppError::Internal("Failed to create user profile".to_string()));
+        }
+        
+        let created_profile = created.into_iter().next().unwrap();
+        info!("Created new user profile for user: {} with username: {}", user_id, created_profile.username);
+        
+        Ok(created_profile)
     }
 
     /// 根据用户ID获取用户资料
     pub async fn get_profile_by_user_id(&self, user_id: &str) -> Result<Option<UserProfile>> {
         debug!("Getting user profile by user_id: {}", user_id);
         
-        let profiles: Vec<UserProfile> = self.db.select(&format!("user_profile:user_id:{}", user_id)).await?;
+        let query = "SELECT * FROM user_profile WHERE user_id = $user_id LIMIT 1";
+        let mut response = self.db.query_with_params(query, json!({ "user_id": user_id })).await?;
+        let profiles: Vec<UserProfile> = response.take(0)?;
         Ok(profiles.into_iter().next())
     }
 
@@ -154,11 +222,7 @@ impl UserService {
         profile.updated_at = Utc::now();
 
         // 更新数据库
-        let thing = Thing {
-            tb: "user_profile".to_string(),
-            id: surrealdb::sql::Id::String(profile.id.clone()),
-        };
-        let result = self.db.update(thing, profile).await?
+        let result = self.db.update(profile.id.clone(), profile).await?
             .ok_or_else(|| AppError::NotFound("Failed to update profile".to_string()))?;
         
         info!("Updated user profile for user: {}", user_id);
@@ -383,26 +447,8 @@ impl UserService {
     ) -> Result<UserProfile> {
         // 先尝试获取现有资料
         if let Some(mut profile) = self.get_profile_by_user_id(user_id).await? {
-            // 如果存在，更新邮箱验证状态（因为这可能会变化）
-            if profile.email != email || profile.email_verified != email_verified {
-                profile.email = email.to_string();
-                profile.email_verified = email_verified;
-                profile.updated_at = Utc::now();
-                
-                // 更新数据库中的邮箱信息
-                let update_query = r#"
-                    UPDATE user_profile 
-                    SET email = $email, email_verified = $email_verified, updated_at = $now
-                    WHERE user_id = $user_id
-                "#;
-                
-                self.db.query_with_params(update_query, json!({
-                    "user_id": user_id,
-                    "email": email,
-                    "email_verified": email_verified,
-                    "now": profile.updated_at
-                })).await?;
-            }
+            // 不需要更新 email，因为我们不在数据库中存储它
+            // email 信息始终从 Rainbow-Auth 获取
             return Ok(profile);
         }
 
@@ -427,7 +473,7 @@ impl UserService {
         }
 
         // 使用提供的用户名或从邮箱生成
-        let base_username = if let Some(username) = username {
+        let mut base_username = if let Some(username) = username {
             username
         } else {
             email.split('@').next()
@@ -437,6 +483,11 @@ impl UserService {
                 .collect::<String>()
                 .to_lowercase()
         };
+        
+        // 确保用户名至少有3个字符
+        if base_username.len() < 3 {
+            base_username = format!("user_{}", base_username);
+        }
             
         let original_username = if base_username.is_empty() {
             format!("user{}", Uuid::new_v4().simple())
@@ -446,12 +497,15 @@ impl UserService {
         
         // 生成唯一用户名
         let mut profile = UserProfile {
-            id: Uuid::new_v4().to_string(),
+            id: Thing {
+                tb: "user_profile".to_string(),
+                id: surrealdb::sql::Id::String(Uuid::new_v4().to_string()),
+            },
             user_id: user_id.to_string(),
             username: original_username.clone(),
             display_name: display_name.unwrap_or_else(|| original_username.clone()),
-            email: email.to_string(),
-            email_verified,
+            email: None,
+            email_verified: None,
             bio: None,
             avatar_url: None,
             cover_image_url: None,
@@ -474,11 +528,79 @@ impl UserService {
         // 确保用户名唯一
         profile.username = self.generate_unique_username(&profile.username).await?;
         
-        // 保存到数据库
-        self.db.create("user_profile", profile.clone()).await?;
+        // 创建用户资料，使用 SurrealDB 的 time::now() 函数处理时间
+        let create_query = format!(
+            r#"
+            CREATE user_profile CONTENT {{
+                id: "{}",
+                user_id: "{}",
+                username: "{}",
+                display_name: "{}",
+                bio: {},
+                avatar_url: {},
+                cover_image_url: {},
+                website: {},
+                location: {},
+                twitter_username: {},
+                github_username: {},
+                linkedin_url: {},
+                facebook_url: {},
+                follower_count: {},
+                following_count: {},
+                article_count: {},
+                total_claps_received: {},
+                is_verified: {},
+                is_suspended: {},
+                created_at: time::now(),
+                updated_at: time::now()
+            }}
+            "#,
+            profile.id.id.to_string(),
+            profile.user_id,
+            profile.username,
+            profile.display_name,
+            profile.bio.as_ref().map(|s| format!("\"{}\"", s)).unwrap_or("NULL".to_string()),
+            profile.avatar_url.as_ref().map(|s| format!("\"{}\"", s)).unwrap_or("NULL".to_string()),
+            profile.cover_image_url.as_ref().map(|s| format!("\"{}\"", s)).unwrap_or("NULL".to_string()),
+            profile.website.as_ref().map(|s| format!("\"{}\"", s)).unwrap_or("NULL".to_string()),
+            profile.location.as_ref().map(|s| format!("\"{}\"", s)).unwrap_or("NULL".to_string()),
+            profile.twitter_username.as_ref().map(|s| format!("\"{}\"", s)).unwrap_or("NULL".to_string()),
+            profile.github_username.as_ref().map(|s| format!("\"{}\"", s)).unwrap_or("NULL".to_string()),
+            profile.linkedin_url.as_ref().map(|s| format!("\"{}\"", s)).unwrap_or("NULL".to_string()),
+            profile.facebook_url.as_ref().map(|s| format!("\"{}\"", s)).unwrap_or("NULL".to_string()),
+            profile.follower_count,
+            profile.following_count,
+            profile.article_count,
+            profile.total_claps_received,
+            profile.is_verified,
+            profile.is_suspended,
+        );
         
+        debug!("Creating user profile with query: {}", create_query);
+        
+        let mut response = self.db.query(&create_query).await
+            .map_err(|e| {
+                error!("Failed to create user profile record: {:?}", e);
+                AppError::Internal(format!("Failed to create user profile: {}", e))
+            })?;
+            
+        let created: Vec<UserProfile> = response.take(0)?;
+        if created.is_empty() {
+            error!("No user profile was created for user: {}", user_id);
+            return Err(AppError::Internal("Failed to create user profile".to_string()));
+        }
+        
+        let result = created.into_iter().next().unwrap();
+        debug!("Successfully created user profile with ID: {}", result.id);
         info!("Created user profile for user: {}", user_id);
-        Ok(profile)
+        
+        // 从数据库重新获取创建的记录，确保数据已经持久化
+        if let Some(created_profile) = self.get_profile_by_user_id(user_id).await? {
+            Ok(created_profile)
+        } else {
+            error!("Failed to retrieve created profile for user: {}", user_id);
+            Err(AppError::Internal("Profile was created but could not be retrieved".to_string()))
+        }
     }
 
     /// 获取热门用户

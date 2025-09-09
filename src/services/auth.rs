@@ -58,21 +58,96 @@ pub struct User {
     pub created_at: DateTime<Utc>,
 }
 
+// 自定义反序列化函数，支持整数时间戳和 RFC 3339 字符串
+mod datetime_flexible {
+    use chrono::{DateTime, Utc, TimeZone};
+    use serde::{Deserialize, Deserializer};
+    
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<DateTime<Utc>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum DateTimeFormat {
+            Timestamp(i64),
+            String(String),
+        }
+        
+        match DateTimeFormat::deserialize(deserializer)? {
+            DateTimeFormat::Timestamp(ts) => {
+                Utc.timestamp_opt(ts, 0)
+                    .single()
+                    .ok_or_else(|| serde::de::Error::custom("Invalid timestamp"))
+            }
+            DateTimeFormat::String(s) => {
+                DateTime::parse_from_rfc3339(&s)
+                    .map(|dt| dt.with_timezone(&Utc))
+                    .map_err(serde::de::Error::custom)
+            }
+        }
+    }
+}
+
+mod datetime_flexible_option {
+    use chrono::{DateTime, Utc, TimeZone};
+    use serde::{Deserialize, Deserializer};
+    
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<DateTime<Utc>>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum DateTimeFormat {
+            Timestamp(i64),
+            String(String),
+            None,
+        }
+        
+        match DateTimeFormat::deserialize(deserializer)? {
+            DateTimeFormat::Timestamp(ts) => {
+                Utc.timestamp_opt(ts, 0)
+                    .single()
+                    .ok_or_else(|| serde::de::Error::custom("Invalid timestamp"))
+                    .map(Some)
+            }
+            DateTimeFormat::String(s) => {
+                DateTime::parse_from_rfc3339(&s)
+                    .map(|dt| dt.with_timezone(&Utc))
+                    .map_err(serde::de::Error::custom)
+                    .map(Some)
+            }
+            DateTimeFormat::None => Ok(None),
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct RainbowAuthUserResponse {
     pub id: String,
     pub email: String,
-    pub username: Option<String>,
+    #[serde(default, alias = "is_email_verified", alias = "verified")]
     pub email_verified: bool,
-    pub created_at: String,
-    pub profile: Option<UserProfileResponse>,
+    #[serde(deserialize_with = "datetime_flexible::deserialize")]
+    pub created_at: DateTime<Utc>,
+    #[serde(default)]
+    pub has_password: bool,
+    #[serde(default)]
+    pub account_status: RainbowAuthAccountStatus,
+    #[serde(default, deserialize_with = "datetime_flexible_option::deserialize")]
+    pub last_login_at: Option<DateTime<Utc>>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-pub struct UserProfileResponse {
-    pub display_name: Option<String>,
-    pub avatar_url: Option<String>,
-    pub bio: Option<String>,
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+#[serde(rename_all = "PascalCase")]
+pub enum RainbowAuthAccountStatus {
+    #[default]
+    Active,
+    Inactive,
+    Suspended,
+    PendingDeletion,
+    Deleted,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -127,7 +202,7 @@ impl AuthService {
         }
 
         // 调用 Rainbow-Auth 获取用户信息
-        let url = format!("{}/api/users/me", self.config.auth_service_url);
+        let url = format!("{}/api/auth/me", self.config.auth_service_url);
         
         let response = self.http_client
             .get(&url)
@@ -144,9 +219,19 @@ impl AuthService {
             return Err(AppError::Authentication("Invalid credentials".to_string()));
         }
 
-        let user_data: RainbowAuthUserResponse = response.json().await
+        // 先获取响应文本，以便调试
+        let response_text = response.text().await
             .map_err(|e| {
-                error!("Failed to parse Rainbow-Auth response: {}", e);
+                error!("Failed to read Rainbow-Auth response: {}", e);
+                AppError::Authentication("Failed to read response from Rainbow-Auth".to_string())
+            })?;
+        
+        debug!("Rainbow-Auth response: {}", response_text);
+        
+        // 尝试解析响应
+        let user_data: RainbowAuthUserResponse = serde_json::from_str(&response_text)
+            .map_err(|e| {
+                error!("Failed to parse Rainbow-Auth response: {}, response was: {}", e, response_text);
                 AppError::Authentication("Invalid response from Rainbow-Auth".to_string())
             })?;
 
@@ -155,16 +240,14 @@ impl AuthService {
 
         let user = User {
             id: user_data.id.clone(),
-            email: user_data.email,
-            username: user_data.username,
-            display_name: user_data.profile.as_ref().and_then(|p| p.display_name.clone()),
-            avatar_url: user_data.profile.as_ref().and_then(|p| p.avatar_url.clone()),
+            email: user_data.email.clone(),
+            username: Some(user_data.email.split('@').next().unwrap_or("user").to_string()), // 使用邮箱前缀作为默认用户名
+            display_name: None, // Rainbow-Auth 不提供，稍后从 user_profile 获取
+            avatar_url: None, // Rainbow-Auth 不提供，稍后从 user_profile 获取
             roles: vec!["user".to_string()], // 基础角色
             permissions,
             is_verified: user_data.email_verified,
-            created_at: chrono::DateTime::parse_from_rfc3339(&user_data.created_at)
-                .unwrap_or_else(|_| Utc::now().into())
-                .with_timezone(&Utc),
+            created_at: user_data.created_at,
         };
 
         // 缓存用户数据

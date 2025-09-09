@@ -212,7 +212,11 @@ impl DomainService {
             }
             
             // Update verification record
-            self.db.update_by_id("domain_verification_record", &record.id.to_string(), &record).await?;
+            let thing = soulcore::prelude::Thing {
+                tb: "domain_verification_record".to_string(),
+                id: surrealdb::sql::Id::String(record.id.to_string()),
+            };
+            self.db.update(thing, record.clone()).await?;
             updated_records.push(record);
         }
 
@@ -528,7 +532,7 @@ impl DomainService {
     async fn verify_cname_record(&self, name: &str, expected_value: &str) -> Result<bool> {
         debug!("Verifying CNAME record for {}", name);
 
-        let lookup = self.dns_resolver.cname_lookup(name).await
+        let lookup = self.dns_resolver.lookup(name, trust_dns_resolver::proto::rr::RecordType::CNAME).await
             .map_err(|e| AppError::ExternalService(format!("DNS lookup failed: {}", e)))?;
 
         for record in lookup.iter() {
@@ -674,12 +678,12 @@ impl DomainService {
     pub async fn get_domain_stats(&self) -> Result<DomainStats> {
         let query = "
             SELECT 
-                COUNT(*) as total_domains,
-                COUNT(CASE WHEN status = 'active' THEN 1 END) as active_domains,
-                COUNT(CASE WHEN status = 'pending' THEN 1 END) as pending_domains,
-                COUNT(CASE WHEN status = 'failed' THEN 1 END) as failed_domains,
-                COUNT(CASE WHEN ssl_status = 'active' THEN 1 END) as ssl_active,
-                COUNT(CASE WHEN ssl_status = 'pending' THEN 1 END) as ssl_pending
+                count() as total_domains,
+                count(IF status = 'active' THEN 1 ELSE NULL END) as active_domains,
+                count(IF status = 'pending' THEN 1 ELSE NULL END) as pending_domains,
+                count(IF status = 'failed' THEN 1 ELSE NULL END) as failed_domains,
+                count(IF ssl_status = 'active' THEN 1 ELSE NULL END) as ssl_active,
+                count(IF ssl_status = 'pending' THEN 1 ELSE NULL END) as ssl_pending
             FROM publication_domain
         ";
 

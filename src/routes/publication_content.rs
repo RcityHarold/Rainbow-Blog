@@ -1,6 +1,6 @@
 use crate::{
     error::{AppError, Result},
-    models::{article::Article, publication::Publication},
+    models::{article::Article, publication::{Publication, MemberRole}},
     services::auth::User,
     state::AppState,
     utils::middleware::{OptionalAuth, OptionalPublicationContext, RequiredPublicationContext},
@@ -91,8 +91,8 @@ async fn get_publication_articles(
     debug!("Getting articles for publication: {} via domain: {}", 
            context.publication.name, context.domain);
     
-    let page = params.page.unwrap_or(1);
-    let per_page = params.per_page.unwrap_or(20);
+    let page = params.page.unwrap_or(1) as usize;
+    let per_page = params.per_page.unwrap_or(20) as usize;
     let tag = params.tag;
     let search = params.search;
     
@@ -139,13 +139,13 @@ async fn get_publication_article(
     
     // Get article by slug within this publication
     let article = state.article_service
-        .get_article_by_slug_in_publication(&slug, &context.publication_id)
+        .get_article_by_slug_in_publication(&context.publication_id, &slug, user.as_ref().map(|u| u.id.as_str()))
         .await?
         .ok_or_else(|| AppError::NotFound("Article not found in this publication".to_string()))?;
     
     // Get related articles from same publication
     let related_articles = state.article_service
-        .get_related_articles_in_publication(&article.id, &context.publication_id, 5)
+        .get_related_articles_in_publication(&context.publication_id, &article.id, 5)
         .await?;
     
     // Increment view count
@@ -177,7 +177,7 @@ async fn get_publication_about(
     
     // Get publication members/writers
     let writers = state.publication_service
-        .get_publication_members(&context.publication_id)
+        .get_publication_members(&context.publication_id, Some(MemberRole::Writer))
         .await?;
     
     // Get publication statistics
@@ -202,7 +202,7 @@ async fn get_publication_writers(
            context.publication.name, context.domain);
     
     let members = state.publication_service
-        .get_publication_members(&context.publication_id)
+        .get_publication_members(&context.publication_id, None)
         .await?;
     
     // Get article counts for each writer in this publication
@@ -237,8 +237,8 @@ async fn api_get_publication_articles(
     RequiredPublicationContext(context): RequiredPublicationContext,
     Query(params): Query<ArticleListParams>,
 ) -> Result<Json<Value>> {
-    let page = params.page.unwrap_or(1);
-    let per_page = params.per_page.unwrap_or(20).min(100); // Max 100 per page
+    let page = params.page.unwrap_or(1) as usize;
+    let per_page = params.per_page.unwrap_or(20).min(100) as usize; // Max 100 per page
     
     let articles = state.article_service
         .get_articles_by_publication(&context.publication_id, page, per_page, None, None)
@@ -315,9 +315,9 @@ async fn get_publication_stats(
         .unwrap_or(0);
     
     Ok(PublicationStats {
-        article_count,
-        member_count,
-        total_views,
+        article_count: article_count as u64,
+        member_count: member_count as u64,
+        total_views: total_views as u64,
         follower_count: 0, // Implement this when follow system is ready
     })
 }

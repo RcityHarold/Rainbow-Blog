@@ -811,9 +811,9 @@ DEFINE FUNCTION fn::update_creator_earnings_summary($creator_id: string, $year: 
             math::sum(platform_fee) AS total_platform_fee,
             math::sum(processing_fee) AS total_processing_fee,
             math::sum(net_amount) AS total_net,
-            math::sum(CASE WHEN source_type = 'subscription' THEN net_amount ELSE 0 END) AS subscription_earnings,
-            math::sum(CASE WHEN source_type = 'one_time_purchase' THEN net_amount ELSE 0 END) AS purchase_earnings,
-            math::sum(CASE WHEN source_type = 'tip' THEN net_amount ELSE 0 END) AS tip_earnings
+            math::sum(IF source_type = 'subscription' THEN net_amount ELSE 0 END) AS subscription_earnings,
+            math::sum(IF source_type = 'one_time_purchase' THEN net_amount ELSE 0 END) AS purchase_earnings,
+            math::sum(IF source_type = 'tip' THEN net_amount ELSE 0 END) AS tip_earnings
         FROM creator_earning 
         WHERE creator_id = $creator_id 
         AND time::year(created_at) = $year 

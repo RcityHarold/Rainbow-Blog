@@ -380,18 +380,21 @@ impl ArticleService {
         let where_clause = conditions.join(" AND ");
 
         // 排序
-        let order_by = match query.sort.as_deref() {
-            Some("oldest") => "created_at ASC",
-            Some("popular") => "clap_count DESC, view_count DESC",
-            Some("trending") => "(clap_count + comment_count * 2 + view_count * 0.1) DESC",
-            _ => "created_at DESC",
+        let (select_fields, order_by) = match query.sort.as_deref() {
+            Some("oldest") => ("*", "created_at ASC"),
+            Some("popular") => ("*", "clap_count DESC, view_count DESC"),
+            Some("trending") => {
+                // 在 SELECT 中计算趋势分数
+                ("*, (clap_count + comment_count * 2 + view_count * 0.1) as trending_score", "trending_score DESC")
+            },
+            _ => ("*", "created_at DESC"),
         };
 
         // 构建查询
         let count_query = format!("SELECT count() AS total FROM article WHERE {}", where_clause);
         let data_query = format!(
-            "SELECT * FROM article WHERE {} ORDER BY {} LIMIT $limit START $offset",
-            where_clause, order_by
+            "SELECT {} FROM article WHERE {} ORDER BY {} LIMIT $limit START $offset",
+            select_fields, where_clause, order_by
         );
 
         // 构建参数
@@ -655,34 +658,52 @@ impl ArticleService {
     pub async fn aggregate_daily_stats(&self) -> Result<()> {
         debug!("Aggregating daily article stats");
 
-        let query = r#"
-            -- 聚合今天的文章统计
-            LET $today = time::floor(time::now(), 'day');
-            LET $stats = (
-                SELECT 
-                    count() as total_articles,
-                    sum(view_count) as total_views,
-                    sum(clap_count) as total_claps,
-                    sum(comment_count) as total_comments,
-                    avg(reading_time) as avg_reading_time
-                FROM article
-                WHERE created_at >= $today AND created_at < time::add($today, 1d)
-            );
-            
-            -- 创建或更新统计记录
-            UPSERT daily_article_stats:[$today] 
-            CONTENT {
-                date: $today,
-                total_articles: $stats.total_articles,
-                total_views: $stats.total_views,
-                total_claps: $stats.total_claps,
-                total_comments: $stats.total_comments,
-                avg_reading_time: $stats.avg_reading_time,
-                updated_at: time::now()
-            };
+        // 使用更简单的方法来避免复杂的字段名
+        let today = Utc::now().date_naive().and_hms_opt(0, 0, 0).unwrap();
+        let tomorrow = today + chrono::Duration::days(1);
+        
+        // 先获取统计数据
+        let stats_query = r#"
+            SELECT 
+                count() as total_articles,
+                math::sum(view_count) as total_views,
+                math::sum(clap_count) as total_claps,
+                math::sum(comment_count) as total_comments,
+                math::mean(reading_time) as avg_reading_time
+            FROM article
+            WHERE created_at >= $today 
+            AND created_at < $tomorrow
         "#;
-
-        self.db.query(query).await?;
+        
+        let mut response = self.db.query_with_params(stats_query, json!({
+            "today": today,
+            "tomorrow": tomorrow
+        })).await?;
+        
+        let stats: Vec<serde_json::Value> = response.take(0)?;
+        
+        if let Some(stat) = stats.first() {
+            // 创建或更新统计记录
+            let upsert_query = r#"
+                UPDATE daily_article_stats:[$today] MERGE $stats
+            "#;
+            
+            let stats_data = json!({
+                "date": today,
+                "total_articles": stat.get("total_articles").and_then(|v| v.as_i64()).unwrap_or(0),
+                "total_views": stat.get("total_views").and_then(|v| v.as_i64()).unwrap_or(0),
+                "total_claps": stat.get("total_claps").and_then(|v| v.as_i64()).unwrap_or(0),
+                "total_comments": stat.get("total_comments").and_then(|v| v.as_i64()).unwrap_or(0),
+                "avg_reading_time": stat.get("avg_reading_time").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                "updated_at": Utc::now()
+            });
+            
+            self.db.query_with_params(upsert_query, json!({
+                "today": today.to_string(),
+                "stats": stats_data
+            })).await?;
+        }
+        
         Ok(())
     }
 
@@ -937,6 +958,252 @@ impl ArticleService {
             .and_then(|v| v.as_i64())
             .unwrap_or(0);
 
+        Ok(count)
+    }
+
+    /// 获取出版物的文章列表
+    pub async fn get_articles_by_publication(
+        &self, 
+        publication_id: &str, 
+        page: usize, 
+        per_page: usize, 
+        tag: Option<&str>,
+        search: Option<&str>
+    ) -> Result<Vec<ArticleListItem>> {
+        debug!("Getting articles for publication: {}", publication_id);
+        
+        let offset = (page - 1) * per_page;
+        
+        // 构建查询条件
+        let mut conditions = vec![
+            "publication_id = $publication_id".to_string(),
+            "status = 'published'".to_string(),
+            "is_deleted = false".to_string(),
+        ];
+        
+        // 添加标签过滤
+        if let Some(tag) = tag {
+            conditions.push(format!("$tag IN tags"));
+        }
+        
+        // 添加搜索过滤
+        if let Some(search_term) = search {
+            conditions.push(format!("(title ~ $search OR content ~ $search)"));
+        }
+        
+        let where_clause = conditions.join(" AND ");
+        
+        let query = format!(r#"
+            SELECT 
+                id, title, subtitle, slug, excerpt, cover_image_url,
+                author_id, publication_id, reading_time, 
+                view_count, clap_count, comment_count,
+                created_at, published_at
+            FROM article 
+            WHERE {}
+            ORDER BY published_at DESC
+            LIMIT $limit START $offset
+        "#, where_clause);
+        
+        let mut params = json!({
+            "publication_id": publication_id,
+            "limit": per_page,
+            "offset": offset
+        });
+        
+        if let Some(tag) = tag {
+            params["tag"] = json!(tag);
+        }
+        
+        if let Some(search_term) = search {
+            params["search"] = json!(search_term);
+        }
+        
+        let mut response = self.db.query_with_params(&query, params).await?;
+        let articles: Vec<ArticleListItem> = response.take(0)?;
+        
+        Ok(articles)
+    }
+    
+    /// 统计出版物的文章总数
+    pub async fn count_articles_by_publication(
+        &self, 
+        publication_id: &str,
+        tag: Option<&str>,
+        search: Option<&str>
+    ) -> Result<usize> {
+        debug!("Counting articles for publication: {}", publication_id);
+        
+        // 构建查询条件
+        let mut conditions = vec![
+            "publication_id = $publication_id".to_string(),
+            "status = 'published'".to_string(),
+            "is_deleted = false".to_string(),
+        ];
+        
+        // 添加标签过滤
+        if let Some(tag) = tag {
+            conditions.push(format!("$tag IN tags"));
+        }
+        
+        // 添加搜索过滤
+        if let Some(search_term) = search {
+            conditions.push(format!("(title ~ $search OR content ~ $search)"));
+        }
+        
+        let where_clause = conditions.join(" AND ");
+        
+        let query = format!(r#"
+            SELECT count() as total FROM article 
+            WHERE {}
+        "#, where_clause);
+        
+        let mut params = json!({
+            "publication_id": publication_id
+        });
+        
+        if let Some(tag) = tag {
+            params["tag"] = json!(tag);
+        }
+        
+        if let Some(search_term) = search {
+            params["search"] = json!(search_term);
+        }
+        
+        let mut response = self.db.query_with_params(&query, params).await?;
+        
+        let result: Vec<serde_json::Value> = response.take(0)?;
+        let count = result.first()
+            .and_then(|v| v.get("total"))
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0) as usize;
+        
+        Ok(count)
+    }
+
+    /// 获取出版物中特定slug的文章
+    pub async fn get_article_by_slug_in_publication(
+        &self,
+        publication_id: &str,
+        slug: &str,
+        viewer_user_id: Option<&str>
+    ) -> Result<Option<ArticleResponse>> {
+        debug!("Getting article by slug {} in publication {}", slug, publication_id);
+        
+        // 获取文章基础信息并检查是否属于该出版物
+        let article = match self.get_article_by_slug(slug).await? {
+            Some(article) => article,
+            None => return Ok(None),
+        };
+        
+        // 检查文章是否属于该出版物
+        if article.publication_id.as_deref() != Some(publication_id) {
+            return Ok(None);
+        }
+        
+        // 获取完整的文章信息
+        self.get_article_with_details(slug, viewer_user_id).await
+    }
+    
+    /// 获取出版物中的相关文章
+    pub async fn get_related_articles_in_publication(
+        &self,
+        publication_id: &str,
+        article_id: &str,
+        limit: usize
+    ) -> Result<Vec<ArticleListItem>> {
+        debug!("Getting related articles for {} in publication {}", article_id, publication_id);
+        
+        // 获取当前文章的标签
+        let tags = self.get_article_tags(article_id).await?;
+        let tag_ids: Vec<String> = tags.iter().map(|t| t.id.clone()).collect();
+        
+        if tag_ids.is_empty() {
+            // 如果没有标签，返回该出版物最新的文章
+            return self.get_articles_by_publication(publication_id, 1, limit, None, None).await;
+        }
+        
+        // 基于标签查找相关文章
+        let query = r#"
+            SELECT DISTINCT
+                a.id, a.title, a.subtitle, a.slug, a.excerpt, a.cover_image_url,
+                a.author_id, a.publication_id, a.reading_time, 
+                a.view_count, a.clap_count, a.comment_count,
+                a.created_at, a.published_at
+            FROM article a
+            JOIN article_tag at ON a.id = at.article_id
+            WHERE a.publication_id = $publication_id
+                AND a.id != $article_id
+                AND at.tag_id IN $tag_ids
+                AND a.status = 'published'
+                AND a.is_deleted = false
+            ORDER BY a.published_at DESC
+            LIMIT $limit
+        "#;
+        
+        let mut response = self.db.query_with_params(query, json!({
+            "publication_id": publication_id,
+            "article_id": article_id,
+            "tag_ids": tag_ids,
+            "limit": limit
+        })).await?;
+        
+        Ok(response.take(0)?)
+    }
+    
+    /// 获取出版物中特定用户的文章数量
+    pub async fn count_articles_by_user_in_publication(
+        &self,
+        publication_id: &str,
+        user_id: &str
+    ) -> Result<usize> {
+        debug!("Counting articles by user {} in publication {}", user_id, publication_id);
+        
+        let query = r#"
+            SELECT count() as total 
+            FROM article 
+            WHERE publication_id = $publication_id 
+                AND author_id = $user_id
+                AND status = 'published' 
+                AND is_deleted = false
+        "#;
+        
+        let mut response = self.db.query_with_params(query, json!({
+            "publication_id": publication_id,
+            "user_id": user_id
+        })).await?;
+        
+        let result: Vec<serde_json::Value> = response.take(0)?;
+        let count = result.first()
+            .and_then(|v| v.get("total"))
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0) as usize;
+        
+        Ok(count)
+    }
+    
+    /// 获取出版物的总浏览量
+    pub async fn get_total_views_by_publication(&self, publication_id: &str) -> Result<usize> {
+        debug!("Getting total views for publication {}", publication_id);
+        
+        let query = r#"
+            SELECT math::sum(view_count) as total_views 
+            FROM article 
+            WHERE publication_id = $publication_id 
+                AND status = 'published' 
+                AND is_deleted = false
+        "#;
+        
+        let mut response = self.db.query_with_params(query, json!({
+            "publication_id": publication_id
+        })).await?;
+        
+        let result: Vec<serde_json::Value> = response.take(0)?;
+        let count = result.first()
+            .and_then(|v| v.get("total_views"))
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0) as usize;
+        
         Ok(count)
     }
 }

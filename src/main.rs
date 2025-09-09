@@ -179,10 +179,6 @@ async fn main() -> anyhow::Result<()> {
 
     // 构建应用路由
     let app = Router::new()
-        // Health check endpoints (no domain context needed)
-        .route("/", get(health_check))
-        .route("/health", get(health_check))
-        
         // API routes with /api/blog/ prefix (traditional API access)
         .nest("/api/blog/auth", routes::auth::router())
         .nest("/api/blog/users", routes::users::router())
@@ -205,8 +201,12 @@ async fn main() -> anyhow::Result<()> {
         .nest("/api/blog/ws", routes::websocket::router())
         .nest("/api/blog/domains", routes::domain::router())
         
+        // Health check endpoints (no domain context needed)
+        .route("/health", get(health_check))
+        
         // Domain-specific routes (work with custom domains and subdomains)
         // These routes are merged at the root level and rely on domain routing middleware
+        // This must come after specific routes to avoid conflicts
         .merge(routes::publication_content::router())
         
         // Apply middleware layers (order matters - they are applied in reverse)

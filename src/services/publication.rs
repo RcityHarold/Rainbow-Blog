@@ -714,4 +714,62 @@ impl PublicationService {
 
         Ok(count)
     }
+
+    /// 获取出版物的所有成员
+    pub async fn get_publication_members(
+        &self,
+        publication_id: &str,
+        role_filter: Option<MemberRole>,
+    ) -> Result<Vec<PublicationMember>> {
+        debug!("Getting members for publication: {}", publication_id);
+        
+        let mut query = String::from(r#"
+            SELECT * FROM publication_member 
+            WHERE publication_id = $publication_id 
+            AND is_active = true
+        "#);
+        
+        if role_filter.is_some() {
+            query.push_str(" AND role = $role");
+        }
+        
+        query.push_str(" ORDER BY joined_at DESC");
+        
+        let mut params = json!({
+            "publication_id": publication_id
+        });
+        
+        if let Some(role) = role_filter {
+            params["role"] = json!(format!("{:?}", role));
+        }
+        
+        let mut response = self.db.query_with_params(&query, params).await?;
+        let members: Vec<PublicationMember> = response.take(0)?;
+        
+        Ok(members)
+    }
+    
+    /// 统计出版物的成员数量
+    pub async fn count_publication_members(&self, publication_id: &str) -> Result<usize> {
+        debug!("Counting members for publication: {}", publication_id);
+        
+        let query = r#"
+            SELECT count() as total 
+            FROM publication_member 
+            WHERE publication_id = $publication_id 
+            AND is_active = true
+        "#;
+        
+        let mut response = self.db.query_with_params(query, json!({
+            "publication_id": publication_id
+        })).await?;
+        
+        let result: Vec<Value> = response.take(0)?;
+        let count = result.first()
+            .and_then(|v| v.get("total"))
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0) as usize;
+        
+        Ok(count)
+    }
 }

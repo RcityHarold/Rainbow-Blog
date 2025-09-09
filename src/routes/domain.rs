@@ -1,6 +1,7 @@
 use crate::{
     error::{AppError, Result},
     models::domain::*,
+    models::publication::MemberRole,
     services::auth::User,
     state::AppState,
     utils::middleware::OptionalAuth,
@@ -329,8 +330,8 @@ async fn check_publication_permission(
     }
 
     // Check if user is an editor
-    if let Some(member) = publication.member {
-        if member.role == "editor" || member.role == "admin" {
+    if let Some(member_role) = publication.member_role {
+        if member_role == MemberRole::Editor || member_role == MemberRole::Owner {
             return Ok(true);
         }
     }

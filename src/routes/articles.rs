@@ -23,15 +23,19 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/", get(list_articles))
         .route("/trending", get(get_trending_articles))
         .route("/popular", get(get_popular_articles))
-        .route("/:slug", get(get_article_by_slug))
         
         // 需要认证的路由
         .route("/create", post(create_article))
-        .route("/:id/publish", post(publish_article))
-        .route("/:id/unpublish", post(unpublish_article))
-        .route("/:id", put(update_article).delete(delete_article))
-        .route("/:id/view", post(increment_view_count))
-        .route("/:id/clap", post(clap_article))
+        
+        // 文章操作路由 - 使用 /by-id/ 前缀来避免与 slug 冲突
+        .route("/by-id/:id", put(update_article).delete(delete_article))
+        .route("/by-id/:id/publish", post(publish_article))
+        .route("/by-id/:id/unpublish", post(unpublish_article))
+        .route("/by-id/:id/view", post(increment_view_count))
+        .route("/by-id/:id/clap", post(clap_article))
+        
+        // slug 路由放在最后，作为 catch-all
+        .route("/:slug", get(get_article_by_slug))
 }
 
 /// 获取文章列表

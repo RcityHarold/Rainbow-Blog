@@ -24,6 +24,13 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/", get(list_users))
         .route("/popular", get(get_popular_users))
         .route("/search", get(search_users))
+        
+        // 基于用户ID的路由（需要在用户名路由之前，避免冲突）
+        .route("/by-id/:user_id", get(get_user_profile_by_id))
+        .route("/by-id/:user_id/articles", get(get_user_articles_by_id))
+        .route("/by-id/:user_id/stats", get(get_user_activity_stats_by_id))
+        
+        // 基于用户名的路由
         .route("/:username", get(get_user_profile))
         .route("/:username/articles", get(get_user_articles))
         .route("/:username/stats", get(get_user_activity_stats))
@@ -32,6 +39,9 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/me", get(get_current_user_profile))
         .route("/me", put(update_current_user_profile))
         .route("/me/articles", get(get_current_user_articles))
+        
+        // 用户资料创建（给前端注册后调用）
+        .route("/profile", post(create_user_profile))
 }
 
 #[derive(Debug, Deserialize)]
@@ -134,9 +144,31 @@ pub async fn get_user_profile(
         return Err(AppError::NotFound("User not found".to_string()));
     }
 
+    // 获取用户最新文章
+    let recent_articles_result = app_state.article_service.get_user_articles(
+        &profile.user_id,
+        1, // 第一页
+        5, // 限制5篇
+        false, // 不包括草稿
+    ).await;
+    
+    let recent_articles = match recent_articles_result {
+        Ok(result) => result.data.into_iter().map(|article| {
+            json!({
+                "id": article.id,
+                "title": article.title,
+                "slug": article.slug,
+                "published_at": article.published_at,
+                "clap_count": article.clap_count,
+                "reading_time": article.reading_time
+            })
+        }).collect::<Vec<_>>(),
+        Err(_) => vec![], // 如果获取文章失败，返回空数组
+    };
+
     Ok(Json(json!({
-        "success": true,
-        "data": profile.to_response()
+        "profile": profile.to_response(),
+        "recent_articles": recent_articles
     })))
 }
 
@@ -302,5 +334,154 @@ pub async fn get_current_user_articles(
                 "has_prev": result.page > 1,
             }
         }
+    })))
+}
+
+/// 根据用户ID获取用户资料
+/// GET /api/users/by-id/:user_id
+pub async fn get_user_profile_by_id(
+    State(app_state): State<Arc<AppState>>,
+    Path(user_id): Path<String>,
+) -> Result<Json<Value>> {
+    debug!("Fetching user profile for user_id: {}", user_id);
+
+    let profile = app_state.user_service.get_profile_by_user_id(&user_id).await?
+        .ok_or_else(|| AppError::NotFound("User not found".to_string()))?;
+
+    // 检查用户是否被暂停
+    if profile.is_suspended {
+        return Err(AppError::NotFound("User not found".to_string()));
+    }
+
+    // 获取用户最新文章
+    let recent_articles_result = app_state.article_service.get_user_articles(
+        &user_id,
+        1, // 第一页
+        5, // 限制5篇
+        false, // 不包括草稿
+    ).await;
+    
+    let recent_articles = match recent_articles_result {
+        Ok(result) => result.data.into_iter().map(|article| {
+            json!({
+                "id": article.id,
+                "title": article.title,
+                "slug": article.slug,
+                "published_at": article.published_at,
+                "clap_count": article.clap_count,
+                "reading_time": article.reading_time
+            })
+        }).collect::<Vec<_>>(),
+        Err(_) => vec![], // 如果获取文章失败，返回空数组
+    };
+
+    Ok(Json(json!({
+        "profile": profile.to_response(),
+        "recent_articles": recent_articles
+    })))
+}
+
+/// 根据用户ID获取用户的文章列表
+/// GET /api/users/by-id/:user_id/articles
+pub async fn get_user_articles_by_id(
+    State(app_state): State<Arc<AppState>>,
+    Path(user_id): Path<String>,
+    Query(query): Query<UserArticlesQuery>,
+) -> Result<Json<Value>> {
+    debug!("Fetching articles for user_id: {}", user_id);
+
+    // 获取用户资料
+    let profile = app_state.user_service.get_profile_by_user_id(&user_id).await?
+        .ok_or_else(|| AppError::NotFound("User not found".to_string()))?;
+
+    let page = query.page.unwrap_or(1);
+    let limit = query.limit.unwrap_or(20).min(100);
+
+    // 默认只显示已发布的文章
+    let result = app_state.article_service.get_user_articles(
+        &user_id,
+        page,
+        limit,
+        false, // include_drafts = false for public access
+    ).await?;
+
+    Ok(Json(json!({
+        "success": true,
+        "data": {
+            "articles": result.data,
+            "user": profile.to_response(),
+            "pagination": {
+                "current_page": result.page,
+                "total_pages": result.total_pages,
+                "total_items": result.total,
+                "items_per_page": result.per_page,
+                "has_next": result.page < result.total_pages,
+                "has_prev": result.page > 1,
+            }
+        }
+    })))
+}
+
+/// 根据用户ID获取用户活动统计
+/// GET /api/users/by-id/:user_id/stats
+pub async fn get_user_activity_stats_by_id(
+    State(app_state): State<Arc<AppState>>,
+    Path(user_id): Path<String>,
+) -> Result<Json<Value>> {
+    debug!("Fetching activity stats for user_id: {}", user_id);
+
+    // 获取用户资料
+    let profile = app_state.user_service.get_profile_by_user_id(&user_id).await?
+        .ok_or_else(|| AppError::NotFound("User not found".to_string()))?;
+
+    let stats = app_state.user_service.get_user_stats(&user_id).await?;
+
+    Ok(Json(json!({
+        "success": true,
+        "data": {
+            "user": profile.to_response(),
+            "activity": stats
+        }
+    })))
+}
+
+/// 创建用户资料（给前端注册后调用）
+/// POST /api/users/profile
+pub async fn create_user_profile(
+    State(app_state): State<Arc<AppState>>,
+    Json(request): Json<serde_json::Value>,
+) -> Result<Json<Value>> {
+    debug!("Creating user profile with request: {:?}", request);
+
+    let auth_user_id = request.get("auth_user_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| AppError::BadRequest("auth_user_id is required".to_string()))?;
+
+    let username = request.get("username")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| AppError::BadRequest("username is required".to_string()))?;
+
+    let email = request.get("email")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| AppError::BadRequest("email is required".to_string()))?;
+
+    let full_name = request.get("full_name")
+        .and_then(|v| v.as_str());
+
+    // 创建用户资料
+    let profile = app_state.user_service.get_or_create_profile(
+        auth_user_id,
+        email,
+        true, // is_verified
+        Some(username.to_string()),
+        full_name.map(|s| s.to_string()),
+    ).await?;
+
+    info!("Created user profile for user: {}", auth_user_id);
+
+    Ok(Json(json!({
+        "success": true,
+        "data": profile.to_response(),
+        "message": "User profile created successfully"
     })))
 }
