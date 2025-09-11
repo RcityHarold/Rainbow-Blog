@@ -45,7 +45,9 @@ impl MarkdownProcessor {
 
         // 配置标签属性
         let mut tag_attrs = HashMap::new();
-        tag_attrs.insert("a", hashset!["href", "title", "target", "rel"]);
+        // 注意：ammonia 3.3.0 有一个bug，不能显式地设置 'rel' 属性
+        // 它会自动为外部链接添加 rel="noopener noreferrer"
+        tag_attrs.insert("a", hashset!["href", "title", "target"]);
         tag_attrs.insert("img", hashset!["src", "alt", "title", "width", "height"]);
         tag_attrs.insert("pre", hashset!["class"]);
         tag_attrs.insert("code", hashset!["class"]);

@@ -5,6 +5,7 @@ use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Article {
+    #[serde(with = "crate::utils::serde_helpers::thing_id")]
     pub id: String,
     pub title: String,
     pub subtitle: Option<String>,
@@ -13,9 +14,13 @@ pub struct Article {
     pub content_html: String,
     pub excerpt: Option<String>,
     pub cover_image_url: Option<String>,
+    #[serde(with = "crate::utils::serde_helpers::thing_id")]
     pub author_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub publication_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub series_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub series_order: Option<i32>,
     pub status: ArticleStatus,
     pub is_paid_content: bool,
@@ -27,15 +32,20 @@ pub struct Article {
     pub comment_count: i64,
     pub bookmark_count: i64,
     pub share_count: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seo_title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seo_description: Option<String>,
     pub seo_keywords: Vec<String>,
     pub metadata: serde_json::Value,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub published_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_edited_at: Option<DateTime<Utc>>,
     pub is_deleted: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deleted_at: Option<DateTime<Utc>>,
 }
 
@@ -355,10 +365,8 @@ impl From<CreateArticleRequest> for Article {
         article.seo_description = req.seo_description;
         article.seo_keywords = req.seo_keywords.unwrap_or_default();
 
-        // 如果不是保存为草稿，则发布文章
-        if !req.save_as_draft.unwrap_or(true) {
-            article.publish();
-        }
+        // 创建接口总是创建草稿，通过单独的 publish 接口来发布
+        // 忽略 save_as_draft 参数，保持向后兼容
 
         article
     }

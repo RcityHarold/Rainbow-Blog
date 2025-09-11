@@ -15,7 +15,7 @@ use axum::{
 };
 use serde_json::{json, Value};
 use std::sync::Arc;
-use tracing::{info, debug};
+use tracing::{info, debug, error};
 
 pub fn router() -> Router<Arc<AppState>> {
     Router::new()
@@ -313,17 +313,30 @@ pub async fn clap_article(
     Extension(user): Extension<User>,
     Json(request): Json<crate::models::clap::AddClapRequest>,
 ) -> Result<Json<Value>> {
-    debug!("User {} clapping article: {} with count {}", user.id, article_id, request.count);
+    debug!("Clap request received - Path article_id: {}, Request article_id: {}, count: {}, user: {}", 
+           article_id, request.article_id, request.count, user.id);
 
     // 验证请求
     use validator::Validate;
     request.validate()
-        .map_err(|e| AppError::ValidatorError(e))?;
+        .map_err(|e| {
+            error!("Clap request validation failed: {:?}", e);
+            AppError::ValidatorError(e)
+        })?;
+    
+    // 验证路径中的 article_id 和请求体中的 article_id 是否匹配
+    if article_id != request.article_id {
+        error!("Article ID mismatch: path={}, body={}", article_id, request.article_id);
+    }
 
-    // 为文章点赞
+    // 使用路径中的 article_id，而不是请求体中的
     let response = app_state.article_service
         .clap_article(&article_id, &user.id, request.count)
-        .await?;
+        .await
+        .map_err(|e| {
+            error!("Clap service error: {:?}", e);
+            e
+        })?;
 
     info!("User {} clapped article: {} (total claps: {})", user.id, article_id, response.total_claps);
 

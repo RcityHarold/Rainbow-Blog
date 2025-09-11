@@ -278,7 +278,7 @@ impl UserService {
 
         // 获取用户给出的拍手数
         let claps_given_query = r#"
-            SELECT sum(count) as total_claps 
+            SELECT COALESCE(sum(count), 0) as total_claps 
             FROM clap 
             WHERE user_id = $user_id
         "#;

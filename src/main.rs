@@ -110,7 +110,7 @@ async fn main() -> anyhow::Result<()> {
     let comment_service = CommentService::new(db.clone()).await?;
     let notification_service = NotificationService::new(db.clone(), &config).await?;
     let search_service = SearchService::new(db.clone()).await?;
-    let media_service = MediaService::new(&config).await?;
+    let media_service = MediaService::new(&config, db.clone()).await?;
     let recommendation_service = RecommendationService::new(db.clone()).await?;
     let publication_service = PublicationService::new(db.clone()).await?;
     let bookmark_service = BookmarkService::new(db.clone()).await?;

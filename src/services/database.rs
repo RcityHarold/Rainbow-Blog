@@ -1,6 +1,7 @@
 use crate::config::Config;
 use crate::error::{AppError, Result};
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use std::sync::Arc;
 use std::fmt::Debug;
 use soulcore::prelude::*;
@@ -90,6 +91,7 @@ impl Database {
     where
         T: Serialize + for<'de> Deserialize<'de> + Send + Sync + Clone + Debug,
     {
+        // 使用 storage 的原生 create 方法
         let results = self.storage.create(table, data)
             .await
             .map_err(|e| AppError::from(e))?;

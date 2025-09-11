@@ -86,6 +86,27 @@ impl Default for ImageProcessConfig {
 pub struct ImageProcessor;
 
 impl ImageProcessor {
+    /// 创建新的图片处理器实例
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// 检查数据是否为有效图片
+    pub fn is_valid_image(&self, data: &[u8]) -> bool {
+        Self::detect_format(data).is_ok()
+    }
+
+    /// 获取图片尺寸（实例方法包装）
+    pub fn get_dimensions(&self, data: &[u8]) -> Result<ImageDimensions, String> {
+        Self::get_image_dimensions_internal(data)
+    }
+
+    /// 获取图片尺寸（原有的静态方法重命名）
+    pub fn get_image_dimensions(data: &[u8]) -> Result<(u32, u32), String> {
+        let dims = Self::get_image_dimensions_internal(data)?;
+        Ok((dims.width, dims.height))
+    }
+
     /// 检测图片格式
     pub fn detect_format(data: &[u8]) -> Result<ImageFormat, String> {
         if data.len() < 4 {
@@ -111,7 +132,7 @@ impl ImageProcessor {
     }
 
     /// 获取图片尺寸（简化版本，实际应该使用image crate）
-    pub fn get_dimensions(data: &[u8]) -> Result<ImageDimensions, String> {
+    pub fn get_image_dimensions_internal(data: &[u8]) -> Result<ImageDimensions, String> {
         let format = Self::detect_format(data)?;
         
         match format {
@@ -190,7 +211,7 @@ impl ImageProcessor {
     /// 获取图片元数据
     pub fn get_metadata(data: &[u8]) -> Result<ImageMetadata, String> {
         let format = Self::detect_format(data)?;
-        let dimensions = Self::get_dimensions(data)?;
+        let dimensions = Self::get_image_dimensions_internal(data)?;
         let has_transparency = Self::has_transparency(&format, data);
         
         Ok(ImageMetadata {
@@ -264,7 +285,7 @@ impl ImageProcessor {
         let format = Self::detect_format(data)?;
         
         // 检查尺寸
-        let dimensions = Self::get_dimensions(data)?;
+        let dimensions = Self::get_image_dimensions_internal(data)?;
         
         // 验证尺寸合理性
         if dimensions.width == 0 || dimensions.height == 0 {

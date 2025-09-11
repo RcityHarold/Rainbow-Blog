@@ -98,8 +98,93 @@ impl ArticleService {
             article.published_at = Some(Utc::now());
         }
 
-        // 创建文章记录
-        let created_article = self.db.create("article", article).await?;
+        // 构建动态字段列表
+        let mut fields = vec![
+            "title: $title".to_string(),
+            "slug: $slug".to_string(),
+            "content: $content".to_string(),
+            "content_html: $content_html".to_string(),
+            "author_id: $author_id".to_string(),
+            "status: $status".to_string(),
+            "is_paid_content: $is_paid_content".to_string(),
+            "is_featured: $is_featured".to_string(),
+            "reading_time: $reading_time".to_string(),
+            "word_count: $word_count".to_string(),
+            "view_count: 0".to_string(),
+            "clap_count: 0".to_string(),
+            "comment_count: 0".to_string(),
+            "bookmark_count: 0".to_string(),
+            "share_count: 0".to_string(),
+            "seo_keywords: $seo_keywords".to_string(),
+            "metadata: $metadata".to_string(),
+            "created_at: time::now()".to_string(),
+            "updated_at: time::now()".to_string(),
+            "is_deleted: false".to_string(),
+        ];
+
+        // 只添加有值的可选字段
+        if article.subtitle.is_some() {
+            fields.push("subtitle: $subtitle".to_string());
+        }
+        if article.excerpt.is_some() {
+            fields.push("excerpt: $excerpt".to_string());
+        }
+        if article.cover_image_url.is_some() {
+            fields.push("cover_image_url: $cover_image_url".to_string());
+        }
+        if article.publication_id.is_some() {
+            fields.push("publication_id: $publication_id".to_string());
+        }
+        if article.series_id.is_some() {
+            fields.push("series_id: $series_id".to_string());
+        }
+        if article.series_order.is_some() {
+            fields.push("series_order: $series_order".to_string());
+        }
+        if article.seo_title.is_some() {
+            fields.push("seo_title: $seo_title".to_string());
+        }
+        if article.seo_description.is_some() {
+            fields.push("seo_description: $seo_description".to_string());
+        }
+        if article.status == ArticleStatus::Published {
+            fields.push("published_at: time::now()".to_string());
+        }
+
+        // 使用具体的记录 ID 创建
+        let query = format!(
+            "CREATE article:`{}` CONTENT {{ {} }} RETURN *",
+            article.id,
+            fields.join(", ")
+        );
+        
+        let params = json!({
+            "title": article.title,
+            "subtitle": article.subtitle,
+            "slug": article.slug,
+            "content": article.content,
+            "content_html": article.content_html,
+            "excerpt": article.excerpt,
+            "cover_image_url": article.cover_image_url,
+            "author_id": article.author_id,
+            "publication_id": article.publication_id,
+            "series_id": article.series_id,
+            "series_order": article.series_order,
+            "status": serde_json::to_value(&article.status)?,
+            "is_paid_content": article.is_paid_content,
+            "is_featured": article.is_featured,
+            "reading_time": article.reading_time,
+            "word_count": article.word_count,
+            "seo_title": article.seo_title,
+            "seo_description": article.seo_description,
+            "seo_keywords": article.seo_keywords,
+            "metadata": article.metadata
+        });
+        
+        let mut response = self.db.query_with_params(&query, params).await?;
+        let created_articles: Vec<Article> = response.take(0)?;
+        let created_article = created_articles.into_iter().next()
+            .ok_or_else(|| AppError::Internal("Failed to create article".to_string()))?;
 
         // 处理标签（如果有）
         if let Some(tags) = &request.tags {
@@ -248,7 +333,21 @@ impl ArticleService {
     pub async fn get_article_by_id(&self, article_id: &str) -> Result<Option<Article>> {
         debug!("Getting article by ID: {}", article_id);
 
-        let articles: Vec<Article> = self.db.select(&format!("article:{}", article_id)).await?;
+        // 获取纯 ID（不带 table 前缀）
+        let pure_id = if article_id.starts_with("article:") {
+            &article_id[8..]
+        } else {
+            article_id
+        };
+
+        // 使用反引号包裹 ID 以避免解析问题
+        let query = format!("SELECT * FROM article:`{}`", pure_id);
+        debug!("Executing query: {}", query);
+        
+        let mut response = self.db.query(&query).await?;
+        
+        let articles: Vec<Article> = response.take(0)?;
+        debug!("Found {} articles", articles.len());
         Ok(articles.into_iter().next())
     }
 
@@ -283,7 +382,7 @@ impl ArticleService {
 
         // 获取系列信息（如果有）
         let series = match &article.series_id {
-            Some(series_id) => self.get_article_series(series_id).await?,
+            Some(series_id) => self.get_article_series(series_id, &article.id).await?,
             None => None,
         };
 
@@ -553,36 +652,81 @@ impl ArticleService {
     /// 获取或创建标签
     async fn get_or_create_tag(&self, tag_name: &str) -> Result<String> {
         let slug = slug::generate_slug(tag_name);
+        debug!("Getting or creating tag with name: {}, slug: {}", tag_name, slug);
         
         // 查找现有标签
         if let Some(tag) = self.db.find_one::<Value>("tag", "slug", &slug).await? {
-            if let Some(id) = tag.get("id").and_then(|v| v.as_str()) {
-                return Ok(id.to_string());
+            debug!("Found existing tag: {:?}", tag);
+            if let Some(id_value) = tag.get("id") {
+                match id_value {
+                    Value::String(s) => return Ok(s.clone()),
+                    Value::Object(obj) => {
+                        // 处理 Thing 格式 { "tb": "tag", "id": { "String": "xxx" } }
+                        if let (Some(tb), Some(id)) = (obj.get("tb"), obj.get("id")) {
+                            let tb_str = tb.as_str().unwrap_or("tag");
+                            let id_str = match id {
+                                Value::String(s) => s.clone(),
+                                Value::Object(id_obj) => {
+                                    id_obj.get("String")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("unknown")
+                                        .to_string()
+                                },
+                                _ => id.to_string()
+                            };
+                            return Ok(format!("{}:{}", tb_str, id_str));
+                        }
+                    },
+                    _ => {}
+                }
             }
         }
 
         // 创建新标签
-        let tag = json!({
-            "id": Uuid::new_v4().to_string(),
-            "name": tag_name,
-            "slug": slug,
-            "created_at": Utc::now(),
-            "updated_at": Utc::now()
-        });
+        let tag_uuid = Uuid::new_v4().to_string();
+        let tag_id = format!("tag:{}", tag_uuid);
+        debug!("Creating new tag with id: {}", tag_id);
+        
+        // 使用 CREATE tag:id 语法而不是参数化的 $id
+        let query = format!(
+            r#"
+            CREATE tag:`{}` CONTENT {{
+                name: $name,
+                slug: $slug,
+                follower_count: 0,
+                article_count: 0,
+                is_featured: false,
+                created_at: time::now(),
+                updated_at: time::now()
+            }} RETURN *
+            "#,
+            tag_uuid
+        );
 
         let result = self.db.query_with_params(
-            "CREATE tag CONTENT $tag RETURN id",
-            json!({ "tag": tag })
+            &query,
+            json!({ 
+                "name": tag_name,
+                "slug": slug
+            })
         ).await?;
 
         let mut response = result;
-        if let Ok(Some(created)) = response.take::<Option<Value>>(0) {
-            if let Some(id) = created.get("id").and_then(|v| v.as_str()) {
-                return Ok(id.to_string());
+        match response.take::<Option<Value>>(0) {
+            Ok(Some(created)) => {
+                debug!("Tag created successfully: {:?}", created);
+                // 我们已经使用了完整的 tag:uuid 格式作为 ID
+                return Ok(tag_id);
+            },
+            Ok(None) => {
+                error!("Tag creation returned no results");
+                Err(AppError::Internal("Tag creation returned no results".to_string()))
+            },
+            Err(e) => {
+                error!("Failed to parse tag creation result: {:?}", e);
+                Err(AppError::Internal(format!("Failed to parse tag creation result: {:?}", e)))
             }
         }
-
-        Err(AppError::Internal("Failed to create tag".to_string()))
     }
 
     /// 发布文章
@@ -603,17 +747,24 @@ impl ArticleService {
             return Err(AppError::BadRequest("Article is already published".to_string()));
         }
         
-        // 更新状态
-        article.status = ArticleStatus::Published;
-        article.published_at = Some(Utc::now());
-        article.updated_at = Utc::now();
-        
-        // 保存到数据库
-        let thing = Thing {
-            tb: "article".to_string(),
-            id: surrealdb::sql::Id::String(article_id.to_string()),
+        // 使用 UPDATE 查询而不是对象更新，避免 ID 格式问题
+        let id_without_prefix = if article_id.starts_with("article:") {
+            &article_id[8..]
+        } else {
+            article_id
         };
-        let updated_article = self.db.update(thing, article).await?
+        
+        let update_query = format!(
+            "UPDATE article:`{}` SET status = $status, published_at = time::now(), updated_at = time::now() RETURN *",
+            id_without_prefix
+        );
+        
+        let mut response = self.db.query_with_params(&update_query, json!({
+            "status": "published"
+        })).await?;
+        
+        let updated_articles: Vec<Article> = response.take(0)?;
+        let updated_article = updated_articles.into_iter().next()
             .ok_or_else(|| AppError::NotFound("Failed to publish article".to_string()))?;
         
         info!("Published article: {}", article_id);
@@ -638,16 +789,24 @@ impl ArticleService {
             return Err(AppError::BadRequest("Article is already in draft status".to_string()));
         }
         
-        // 更新状态
-        article.status = ArticleStatus::Draft;
-        article.updated_at = Utc::now();
-        
-        // 保存到数据库
-        let thing = Thing {
-            tb: "article".to_string(),
-            id: surrealdb::sql::Id::String(article_id.to_string()),
+        // 使用 UPDATE 查询而不是对象更新，避免 ID 格式问题
+        let id_without_prefix = if article_id.starts_with("article:") {
+            &article_id[8..]
+        } else {
+            article_id
         };
-        let updated_article = self.db.update(thing, article).await?
+        
+        let update_query = format!(
+            "UPDATE article:`{}` SET status = $status, updated_at = time::now() RETURN *",
+            id_without_prefix
+        );
+        
+        let mut response = self.db.query_with_params(&update_query, json!({
+            "status": "draft"
+        })).await?;
+        
+        let updated_articles: Vec<Article> = response.take(0)?;
+        let updated_article = updated_articles.into_iter().next()
             .ok_or_else(|| AppError::NotFound("Failed to unpublish article".to_string()))?;
         
         info!("Unpublished article: {}", article_id);
@@ -714,35 +873,90 @@ impl ArticleService {
         let query = r#"
             SELECT id, username, display_name, avatar_url, is_verified 
             FROM user_profile 
-            WHERE id = $author_id
+            WHERE user_id = $author_id
+            LIMIT 1
         "#;
 
         let mut response = self.db.query_with_params(query, json!({
             "author_id": author_id
         })).await?;
 
-        let authors: Vec<AuthorInfo> = response.take(0)?;
-        authors.into_iter().next()
-            .ok_or_else(|| AppError::NotFound(format!("Author {} not found", author_id)))
+        // 直接获取原始数据
+        let results: Vec<Value> = response.take(0)?;
+        let author_data = results.into_iter().next()
+            .ok_or_else(|| AppError::NotFound(format!("Author {} not found", author_id)))?;
+
+        // 手动构造 AuthorInfo
+        Ok(AuthorInfo {
+            id: author_data.get("id")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string(),
+            username: author_data.get("username")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string(),
+            display_name: author_data.get("display_name")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string(),
+            avatar_url: author_data.get("avatar_url")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            is_verified: author_data.get("is_verified")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+        })
     }
 
     /// 获取文章标签
     async fn get_article_tags(&self, article_id: &str) -> Result<Vec<TagInfo>> {
         debug!("Getting tags for article: {}", article_id);
 
+        // First get article_tag relationships
         let query = r#"
-            SELECT t.id, t.name, t.slug 
-            FROM tag t
-            JOIN article_tag at ON t.id = at.tag_id
-            WHERE at.article_id = $article_id
-            ORDER BY t.name
+            SELECT tag_id FROM article_tag WHERE article_id = $article_id
         "#;
 
         let mut response = self.db.query_with_params(query, json!({
             "article_id": article_id
         })).await?;
 
-        Ok(response.take(0).unwrap_or_default())
+        let tag_relations: Vec<Value> = response.take(0).unwrap_or_default();
+        
+        if tag_relations.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Extract tag IDs
+        let tag_ids: Vec<String> = tag_relations.iter()
+            .filter_map(|v| v.get("tag_id").and_then(|id| id.as_str()))
+            .map(|s| s.to_string())
+            .collect();
+
+        if tag_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Now get the tags
+        let mut tags = Vec::new();
+        for tag_id in tag_ids {
+            let tag_query = "SELECT * FROM $tag_id";
+            if let Ok(mut tag_response) = self.db.query_with_params(tag_query, json!({
+                "tag_id": tag_id
+            })).await {
+                if let Ok(tag_values) = tag_response.take::<Vec<Value>>(0) {
+                    for tag_value in tag_values {
+                        if let Ok(tag_info) = serde_json::from_value::<TagInfo>(tag_value) {
+                            tags.push(tag_info);
+                        }
+                    }
+                }
+            }
+        }
+
+        tags.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(tags)
     }
 
     /// 获取文章出版物信息
@@ -764,23 +978,55 @@ impl ArticleService {
     }
 
     /// 获取文章系列信息
-    async fn get_article_series(&self, series_id: &str) -> Result<Option<SeriesInfo>> {
+    async fn get_article_series(&self, series_id: &str, article_id: &str) -> Result<Option<SeriesInfo>> {
         debug!("Getting series info for: {}", series_id);
 
-        let query = r#"
-            SELECT s.id, s.title, s.slug, sa.order
-            FROM series s
-            JOIN series_article sa ON s.id = sa.series_id
-            WHERE s.id = $series_id
-            LIMIT 1
+        // First get the series
+        let series_query = r#"
+            SELECT id, title, slug FROM series WHERE id = $series_id LIMIT 1
         "#;
 
-        let mut response = self.db.query_with_params(query, json!({
+        let mut response = self.db.query_with_params(series_query, json!({
             "series_id": series_id
         })).await?;
 
-        let series: Vec<SeriesInfo> = response.take(0)?;
-        Ok(series.into_iter().next())
+        let series_data: Vec<Value> = response.take(0)?;
+        if let Some(series) = series_data.into_iter().next() {
+            // Then get the order from series_article
+            let order_query = r#"
+                SELECT `order` FROM series_article 
+                WHERE series_id = $series_id AND article_id = $article_id
+                LIMIT 1
+            "#;
+            
+            let mut order_response = self.db.query_with_params(order_query, json!({
+                "series_id": series_id,
+                "article_id": article_id
+            })).await?;
+            
+            let order_data: Vec<Value> = order_response.take(0)?;
+            let order = order_data.into_iter().next()
+                .and_then(|v| v.get("order").and_then(|o| o.as_i64()))
+                .unwrap_or(0) as i32;
+            
+            Ok(Some(SeriesInfo {
+                id: series.get("id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
+                title: series.get("title")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
+                slug: series.get("slug")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
+                order,
+            }))
+        } else {
+            Ok(None)
+        }
     }
 
     /// 检查用户是否收藏了文章
@@ -855,71 +1101,116 @@ impl ArticleService {
         debug!("User {} clapping article {} with count {}", user_id, article_id, count);
 
         // 验证文章存在且已发布
-        let article = self.get_article_by_id(article_id).await?
-            .ok_or_else(|| AppError::NotFound("Article not found".to_string()))?;
+        let article = self.get_article_by_id(article_id).await
+            .map_err(|e| {
+                error!("Failed to get article by id {}: {:?}", article_id, e);
+                e
+            })?
+            .ok_or_else(|| {
+                error!("Article not found: {}", article_id);
+                AppError::NotFound("Article not found".to_string())
+            })?;
 
         if article.status != ArticleStatus::Published {
             return Err(AppError::forbidden("Cannot clap unpublished articles"));
         }
 
         // 获取用户现有的点赞
+        let query = format!(r#"
+            SELECT meta::tb(id) as tb, meta::id(id) as id_val, count FROM clap 
+            WHERE user_id = $user_id 
+            AND article_id = article:`{}`
+        "#, article_id);
+        
+        debug!("Querying existing claps with user_id: {} and article_id: {}", user_id, article_id);
+        
         let mut response = self.db
-            .query_with_params(r#"
-                SELECT * FROM clap 
-                WHERE user_id = $user_id 
-                AND article_id = $article_id
-            "#, json!({
-                "user_id": user_id,
-                "article_id": article_id
+            .query_with_params(&query, json!({
+                "user_id": user_id
             }))
-            .await?;
-        let claps: Vec<crate::models::clap::Clap> = response.take(0)?;
-        let existing_clap = claps.into_iter().next();
+            .await
+            .map_err(|e| {
+                error!("Failed to query existing claps: {:?}", e);
+                e
+            })?;
+        let clap_data: Vec<Value> = response.take(0)?;
+        let existing_clap = clap_data.into_iter().next();
 
-        let user_clap_count = if let Some(mut clap) = existing_clap {
+        let user_clap_count = if let Some(clap_value) = existing_clap {
+            // 获取现有点赞数
+            let current_count = clap_value.get("count")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0) as i32;
+            
             // 检查总数是否超过50
-            let new_total = clap.count + count;
+            let new_total = current_count + count;
             if new_total > 50 {
                 return Err(AppError::BadRequest(
-                    format!("Maximum claps per article is 50. You have {} claps already.", clap.count)
+                    format!("Maximum claps per article is 50. You have {} claps already.", current_count)
                 ));
             }
 
-            // 更新现有点赞
-            clap.count = new_total;
-            clap.updated_at = Utc::now();
+            // 获取点赞ID - 使用meta函数返回的值
+            let tb = clap_value.get("tb")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| AppError::internal("Missing table name"))?;
+            let id_val = clap_value.get("id_val")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| AppError::internal("Missing ID value"))?;
+            
+            let clap_id = format!("{}:{}", tb, id_val);
+            debug!("Updating clap with ID: {}", clap_id);
 
-            let thing = Thing {
-                tb: "clap".to_string(),
-                id: surrealdb::sql::Id::String(clap.id.clone()),
-            };
-            let updated: crate::models::clap::Clap = self.db.update(thing, clap).await?
-                .ok_or_else(|| AppError::internal("Failed to update clap"))?;
-
-            updated.count
+            // 更新现有点赞 - 使用反引号包裹ID
+            let update_query = format!(
+                "UPDATE clap:`{}` SET count = $count, updated_at = time::now() RETURN count",
+                id_val
+            );
+            
+            let mut update_response = self.db.query_with_params(&update_query, json!({
+                "count": new_total
+            })).await?;
+            
+            let result: Vec<Value> = update_response.take(0)?;
+            result.into_iter().next()
+                .and_then(|v| v.get("count").and_then(|c| c.as_i64()))
+                .unwrap_or(new_total as i64) as i32
         } else {
             // 创建新点赞
             if count > 50 {
                 return Err(AppError::BadRequest("Maximum claps per article is 50".to_string()));
             }
 
-            let new_clap = crate::models::clap::Clap {
-                id: Uuid::new_v4().to_string(),
-                user_id: user_id.to_string(),
-                article_id: article_id.to_string(),
-                count,
-                created_at: Utc::now(),
-                updated_at: Utc::now(),
-            };
-
-            let created: crate::models::clap::Clap = self.db.create("clap", new_clap).await?;
-            created.count
+            // 使用 SQL 创建点赞记录，article_id 使用 record 类型
+            let clap_id = Uuid::new_v4().to_string();
+            let create_query = format!(r#"
+                CREATE clap:`{}` CONTENT {{
+                    user_id: $user_id,
+                    article_id: article:`{}`,
+                    count: $count,
+                    created_at: time::now(),
+                    updated_at: time::now()
+                }}
+            "#, clap_id, article_id);
+            
+            let mut create_response = self.db.query_with_params(&create_query, json!({
+                "user_id": user_id,
+                "count": count
+            })).await?;
+            
+            // 检查创建是否成功
+            let created_results: Vec<Value> = create_response.take(0)?;
+            debug!("Created clap results: {:?}", created_results);
+            
+            count
         };
 
         // 更新文章总点赞数
+        debug!("Updating article clap count for article_id: {}", article_id);
         self.update_article_clap_count(article_id).await?;
 
         // 获取文章最新的总点赞数
+        debug!("Getting total claps for article_id: {}", article_id);
         let total_claps = self.get_article_total_claps(article_id).await?;
 
         Ok(crate::models::clap::ClapResponse {
@@ -930,27 +1221,45 @@ impl ArticleService {
 
     /// 更新文章的总点赞数
     async fn update_article_clap_count(&self, article_id: &str) -> Result<()> {
-        let query = r#"
-            LET $total = (SELECT math::sum(count) FROM clap WHERE article_id = $article_id);
-            UPDATE article SET clap_count = $total WHERE id = $article_id;
-        "#;
-
-        self.db.query_with_params(query, json!({
-            "article_id": article_id
-        })).await?;
+        // 获取所有点赞记录的count值
+        let count_query = format!(
+            "SELECT count FROM clap WHERE article_id = article:`{}`",
+            article_id
+        );
+        
+        debug!("Getting all clap counts for article: {}", article_id);
+        
+        let mut count_response = self.db.query(&count_query).await?;
+        let clap_records: Vec<Value> = count_response.take(0)?;
+        
+        // 在应用层计算总和
+        let total_claps: i64 = clap_records.iter()
+            .filter_map(|v| v.get("count"))
+            .filter_map(|v| v.as_i64())
+            .sum();
+        
+        debug!("Total claps calculated for article {}: {}", article_id, total_claps);
+        
+        // 更新文章的点赞数
+        let update_query = format!(
+            "UPDATE article:`{}` SET clap_count = {}",
+            article_id, total_claps
+        );
+        
+        debug!("Updating article clap_count with query: {}", update_query);
+        
+        self.db.query(&update_query).await?;
+        
+        info!("Successfully updated article {} clap_count to {}", article_id, total_claps);
 
         Ok(())
     }
 
     /// 获取文章的总点赞数
     async fn get_article_total_claps(&self, article_id: &str) -> Result<i64> {
-        let query = r#"
-            SELECT clap_count FROM article WHERE id = $article_id
-        "#;
+        let query = format!("SELECT clap_count FROM article:`{}`", article_id);
 
-        let mut response = self.db.query_with_params(query, json!({
-            "article_id": article_id
-        })).await?;
+        let mut response = self.db.query(&query).await?;
 
         let result: Vec<serde_json::Value> = response.take(0)?;
         let count = result.first()

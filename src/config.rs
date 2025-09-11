@@ -231,7 +231,7 @@ impl Config {
                 .unwrap_or_else(|_| "85".to_string())
                 .parse()?,
             allowed_image_types: env::var("ALLOWED_IMAGE_TYPES")
-                .unwrap_or_else(|_| "jpeg,jpg,png,gif,webp".to_string()),
+                .unwrap_or_else(|_| "image/jpeg,image/png,image/gif,image/webp".to_string()),
 
             recommendation_batch_size: env::var("RECOMMENDATION_BATCH_SIZE")
                 .unwrap_or_else(|_| "10".to_string())
