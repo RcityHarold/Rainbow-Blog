@@ -156,10 +156,71 @@ impl CommentService {
         let mut response = self.db.query_with_params(query, json!({
             "article_id": article_id
         })).await?;
-        let comments: Vec<Comment> = response.take(0)?;
+        
+        // Get raw JSON values first
+        let raw_comments: Vec<serde_json::Value> = response.take(0)?;
+        
+        info!("Got {} raw comments from database", raw_comments.len());
+        
+        // Process each comment to fix the ID format
+        let mut processed_comments = Vec::new();
+        for mut comment_value in raw_comments {
+            // Process the main comment ID
+            if let Some(id_value) = comment_value.get("id") {
+                if let Some(id_str) = id_value.as_str() {
+                    // Handle special bracket format: comment:⟨uuid⟩
+                    if id_str.contains("⟨") && id_str.contains("⟩") {
+                        if let Some(start) = id_str.find("⟨") {
+                            if let Some(end) = id_str.find("⟩") {
+                                let uuid = &id_str[start + 3..end];
+                                comment_value["id"] = json!(format!("comment:{}", uuid));
+                            }
+                        }
+                    }
+                } else if let Some(id_obj) = id_value.as_object() {
+                    // Handle SurrealDB Thing format: {"tb": "comment", "id": {"String": "uuid"}}
+                    if let Some(id_inner) = id_obj.get("id").and_then(|v| v.as_object()) {
+                        if let Some(id_str) = id_inner.get("String").and_then(|v| v.as_str()) {
+                            comment_value["id"] = json!(format!("comment:{}", id_str));
+                        }
+                    }
+                }
+            }
+            
+            // Also process parent_id if it exists
+            if let Some(parent_id_value) = comment_value.get_mut("parent_id") {
+                if let Some(parent_str) = parent_id_value.as_str() {
+                    if parent_str.contains("⟨") && parent_str.contains("⟩") {
+                        if let Some(start) = parent_str.find("⟨") {
+                            if let Some(end) = parent_str.find("⟩") {
+                                let uuid = &parent_str[start + 3..end];
+                                *parent_id_value = json!(format!("comment:{}", uuid));
+                            }
+                        }
+                    }
+                } else if let Some(parent_obj) = parent_id_value.as_object() {
+                    // Handle SurrealDB Thing format for parent_id
+                    if let Some(id_inner) = parent_obj.get("id").and_then(|v| v.as_object()) {
+                        if let Some(id_str) = id_inner.get("String").and_then(|v| v.as_str()) {
+                            *parent_id_value = json!(format!("comment:{}", id_str));
+                        }
+                    }
+                }
+            }
+            
+            match serde_json::from_value::<Comment>(comment_value.clone()) {
+                Ok(comment) => processed_comments.push(comment),
+                Err(e) => {
+                    error!("Failed to deserialize comment: {}, raw value: {:?}", e, comment_value);
+                    return Err(AppError::Internal(format!("Failed to deserialize comment: {}", e)));
+                }
+            }
+        }
+        
+        info!("Successfully processed {} comments", processed_comments.len());
 
         // Build comment tree
-        let mut comment_tree = self.build_comment_tree(comments, user_id).await?;
+        let mut comment_tree = self.build_comment_tree(processed_comments, user_id).await?;
         
         Ok(comment_tree)
     }
