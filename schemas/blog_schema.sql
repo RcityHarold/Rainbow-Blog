@@ -184,9 +184,9 @@ DEFINE INDEX clap_user_idx ON clap COLUMNS user_id;
 -- 评论表
 DEFINE TABLE comment SCHEMAFULL;
 DEFINE FIELD id ON comment TYPE record(comment);
-DEFINE FIELD article_id ON comment TYPE record(article) ASSERT $value != NONE;
+DEFINE FIELD article_id ON comment TYPE string ASSERT $value != NONE;
+DEFINE FIELD parent_id ON comment TYPE option<string>;
 DEFINE FIELD author_id ON comment TYPE string ASSERT $value != NONE;
-DEFINE FIELD parent_id ON comment TYPE option<record(comment)>; -- 支持回复
 DEFINE FIELD content ON comment TYPE string ASSERT $value != NONE AND string::len($value) > 0;
 DEFINE FIELD is_author_response ON comment TYPE bool DEFAULT false; -- 作者回复标记
 DEFINE FIELD clap_count ON comment TYPE number DEFAULT 0;
@@ -198,8 +198,8 @@ DEFINE FIELD deleted_at ON comment TYPE option<datetime>;
 
 -- 评论索引
 DEFINE INDEX comment_article_idx ON comment COLUMNS article_id;
-DEFINE INDEX comment_author_idx ON comment COLUMNS author_id;
 DEFINE INDEX comment_parent_idx ON comment COLUMNS parent_id;
+DEFINE INDEX comment_author_idx ON comment COLUMNS author_id;
 DEFINE INDEX comment_deleted_idx ON comment COLUMNS is_deleted;
 
 -- 评论点赞表
