@@ -66,10 +66,20 @@ impl CommentService {
         }
 
         // Verify parent comment exists if provided
+        // Note: SurrealDB may return Thing objects for `id`, which don't deserialize into String directly.
+        // Use a generic JSON value for existence checks to avoid id deserialization issues.
         if let Some(parent_id) = &request.parent_id {
-            let parent: Option<Comment> = self.db.get_by_id("comment", parent_id).await?;
-            if parent.is_none() {
-                return Err(AppError::NotFound("Parent comment not found".to_string()));
+            let parent: Option<serde_json::Value> = self.db.get_by_id("comment", parent_id).await?;
+            match parent {
+                None => {
+                    return Err(AppError::NotFound("Parent comment not found".to_string()));
+                }
+                Some(p) => {
+                    // Disallow replying to deleted comments
+                    if p.get("is_deleted").and_then(|v| v.as_bool()).unwrap_or(false) {
+                        return Err(AppError::NotFound("Parent comment not found".to_string()));
+                    }
+                }
             }
         }
 
