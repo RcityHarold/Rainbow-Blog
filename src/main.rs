@@ -220,6 +220,16 @@ async fn main() -> anyhow::Result<()> {
             utils::middleware::domain_routing_middleware,
         ))
         
+        // Debug middleware to log requests
+        .layer(middleware::from_fn(|req: axum::http::Request<axum::body::Body>, next: axum::middleware::Next<axum::body::Body>| async move {
+            let path = req.uri().path().to_string();
+            let method = req.method().clone();
+            tracing::info!("Incoming request (before auth): {} {}", method, path);
+            let res = next.run(req).await;
+            tracing::info!("Response (after processing): {} {} - {:?}", method, path, res.status());
+            res
+        }))
+        
         // Authentication middleware (can use publication context if available)
         .layer(middleware::from_fn_with_state(
             app_state.clone(),

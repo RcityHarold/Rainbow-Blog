@@ -246,39 +246,66 @@ impl RecommendationService {
 
     /// 获取用户偏好标签
     async fn get_user_preferred_tags(&self, user_id: &str) -> Result<Vec<TagPreference>> {
-        let query = r#"
-            SELECT t.id, t.name, count() * 1.0 as weight
-            FROM tag t
-            JOIN article_tag at ON t.id = at.tag_id
-            JOIN article a ON at.article_id = a.id
-            JOIN clap c ON a.id = c.article_id
-            WHERE c.user_id = $user_id
-            GROUP BY t.id, t.name
-            ORDER BY weight DESC
-            LIMIT 20
-        "#;
-
-        let mut response = self.db.query_with_params(query, json!({
+        // 先获取用户点赞的文章
+        let clapped_query = "SELECT article_id FROM clap WHERE user_id = $user_id";
+        
+        let mut clap_response = self.db.query_with_params(clapped_query, json!({
             "user_id": user_id
         })).await?;
-
-        let results: Vec<Value> = response.take(0)?;
-        let mut preferences = Vec::new();
-
-        for result in results {
-            if let (Some(id), Some(name), Some(weight)) = (
-                result.get("id").and_then(|v| v.as_str()),
-                result.get("name").and_then(|v| v.as_str()),
-                result.get("weight").and_then(|v| v.as_f64()),
-            ) {
-                preferences.push(TagPreference {
-                    tag_id: id.to_string(),
-                    tag_name: name.to_string(),
-                    weight,
-                });
+        
+        let clapped_articles: Vec<Value> = clap_response.take(0)?;
+        if clapped_articles.is_empty() {
+            return Ok(Vec::new());
+        }
+        
+        // 统计每个标签出现的次数
+        let mut tag_weights: HashMap<String, (String, f64)> = HashMap::new();
+        
+        for clap in clapped_articles {
+            if let Some(article_id) = clap.get("article_id").and_then(|v| v.as_str()) {
+                // 获取文章的标签
+                let tags_query = "SELECT tag_id FROM article_tag WHERE article_id = $article_id";
+                
+                if let Ok(mut tags_response) = self.db.query_with_params(tags_query, json!({
+                    "article_id": article_id
+                })).await {
+                    if let Ok(tag_relations) = tags_response.take::<Vec<Value>>(0) {
+                        for rel in tag_relations {
+                            if let Some(tag_id) = rel.get("tag_id").and_then(|v| v.as_str()) {
+                                // 获取标签信息
+                                if let Ok(mut tag_response) = self.db.query(&format!("SELECT * FROM {}", tag_id)).await {
+                                    if let Ok(tags) = tag_response.take::<Vec<Value>>(0) {
+                                        if let Some(tag) = tags.first() {
+                                            if let (Some(id), Some(name)) = (
+                                                tag.get("id").and_then(|v| v.as_str()),
+                                                tag.get("name").and_then(|v| v.as_str())
+                                            ) {
+                                                let entry = tag_weights.entry(id.to_string())
+                                                    .or_insert((name.to_string(), 0.0));
+                                                entry.1 += 1.0;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
-
+        
+        // 转换为 TagPreference 并排序
+        let mut preferences: Vec<TagPreference> = tag_weights.into_iter()
+            .map(|(id, (name, weight))| TagPreference {
+                tag_id: id,
+                tag_name: name,
+                weight,
+            })
+            .collect();
+            
+        preferences.sort_by(|a, b| b.weight.partial_cmp(&a.weight).unwrap_or(std::cmp::Ordering::Equal));
+        preferences.truncate(20);
+        
         Ok(preferences)
     }
 
@@ -869,24 +896,32 @@ impl RecommendationService {
             None
         };
         
-        // Get tags info
-        let tags_query = r#"
-            SELECT t.id, t.name, t.slug
-            FROM tag t
-            JOIN article_tag at ON t.id = at.tag_id
-            WHERE at.article_id = $article_id
-        "#;
+        // Get tags info - 先获取article_tag关系，再获取tag详情
+        let tag_relations_query = "SELECT tag_id FROM article_tag WHERE article_id = $article_id";
         
-        let mut tags_response = self.db.query_with_params(tags_query, json!({
+        let mut tag_rel_response = self.db.query_with_params(tag_relations_query, json!({
             "article_id": &article.id
         })).await?;
         
-        let tags_data: Vec<Value> = tags_response.take(0)?;
-        let tags: Vec<TagInfo> = tags_data.into_iter().map(|t| TagInfo {
-            id: t["id"].as_str().unwrap_or("").to_string(),
-            name: t["name"].as_str().unwrap_or("").to_string(),
-            slug: t["slug"].as_str().unwrap_or("").to_string(),
-        }).collect();
+        let tag_relations: Vec<Value> = tag_rel_response.take(0)?;
+        let mut tags: Vec<TagInfo> = Vec::new();
+        
+        for rel in tag_relations {
+            if let Some(tag_id) = rel.get("tag_id").and_then(|v| v.as_str()) {
+                // 获取tag详情
+                if let Ok(mut tag_response) = self.db.query(&format!("SELECT * FROM {}", tag_id)).await {
+                    if let Ok(tag_values) = tag_response.take::<Vec<Value>>(0) {
+                        if let Some(tag_value) = tag_values.first() {
+                            tags.push(TagInfo {
+                                id: tag_value.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                                name: tag_value.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                                slug: tag_value.get("slug").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                            });
+                        }
+                    }
+                }
+            }
+        }
         
         Ok(ArticleListItem {
             id: article.id.clone(),

@@ -32,6 +32,9 @@ pub async fn auth_middleware(
     mut request: Request<Body>,
     next: Next<Body>,
 ) -> Result<Response, AppError> {
+    let path = request.uri().path();
+    info!("Auth middleware processing request to: {}", path);
+    
     // 将认证服务和用户服务添加到请求扩展中，供后续处理器使用
     request.extensions_mut().insert(app_state.auth_service.clone());
     request.extensions_mut().insert(app_state.user_service.clone());
@@ -66,6 +69,7 @@ pub async fn auth_middleware(
                                 }
                                 
                                 // 将用户信息添加到请求中
+                                info!("Inserting user into request extensions: {}", user.id);
                                 request.extensions_mut().insert(user);
                             }
                             Err(e) => {

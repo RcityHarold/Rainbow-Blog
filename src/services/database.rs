@@ -68,7 +68,7 @@ impl Database {
     pub fn query_builder(&self) -> QueryBuilder {
         self.storage.query_builder()
     }
-
+    
     /// 执行原始SQL查询
     pub async fn query(&self, sql: &str) -> Result<Response> {
         self.storage.query(sql)
@@ -139,8 +139,20 @@ impl Database {
     where
         T: for<'de> Deserialize<'de> + Send + Sync + Debug,
     {
-        let resource = format!("{}:{}", table, id);
-        let results: Vec<T> = self.select(&resource).await?;
+        // 获取纯 ID（不带 table 前缀）
+        let prefix = format!("{}:", table);
+        let pure_id = if id.starts_with(&prefix) {
+            &id[prefix.len()..]
+        } else {
+            id
+        };
+        
+        // 使用反引号包裹 ID 以避免解析问题（与 article.rs 保持一致）
+        let query = format!("SELECT * FROM {}:`{}`", table, pure_id);
+        debug!("Executing query: {}", query);
+        
+        let mut response = self.storage.query(&query).await?;
+        let results: Vec<T> = response.take(0)?;
         Ok(results.into_iter().next())
     }
 

@@ -434,7 +434,7 @@ impl ArticleService {
     }
 
     /// 获取文章列表（分页）
-    pub async fn get_articles(&self, query: ArticleQuery) -> Result<crate::services::database::PaginatedResult<Article>> {
+    pub async fn get_articles(&self, query: ArticleQuery) -> Result<crate::services::database::PaginatedResult<ArticleListItem>> {
         debug!("Getting articles list with query: {:?}", query);
 
         let page = query.page.unwrap_or(1);
@@ -523,9 +523,16 @@ impl ArticleService {
 
         let mut data_response = self.db.query_with_params(&data_query, params).await?;
         let articles: Vec<Article> = data_response.take(0)?;
+        
+        // 将Article转换为ArticleListItem，并填充作者信息
+        let mut article_list_items = Vec::new();
+        for article in articles {
+            let list_item = self.article_to_list_item(&article).await?;
+            article_list_items.push(list_item);
+        }
 
         Ok(crate::services::database::PaginatedResult {
-            data: articles,
+            data: article_list_items,
             total,
             page,
             per_page: limit,
@@ -534,7 +541,7 @@ impl ArticleService {
     }
 
     /// 获取用户的文章列表
-    pub async fn get_user_articles(&self, user_id: &str, page: usize, limit: usize, include_drafts: bool) -> Result<crate::services::database::PaginatedResult<Article>> {
+    pub async fn get_user_articles(&self, user_id: &str, page: usize, limit: usize, include_drafts: bool) -> Result<crate::services::database::PaginatedResult<ArticleListItem>> {
         debug!("Getting articles for user: {} (include_drafts: {})", user_id, include_drafts);
 
         let mut query = ArticleQuery {
@@ -1514,5 +1521,109 @@ impl ArticleService {
             .unwrap_or(0) as usize;
         
         Ok(count)
+    }
+    
+    /// Helper method to convert article data to ArticleListItem
+    async fn article_to_list_item(&self, article: &Article) -> Result<ArticleListItem> {
+        // Get author info
+        let author_query = r#"
+            SELECT id, username, display_name, avatar_url, is_verified
+            FROM user_profile
+            WHERE user_id = $author_id
+        "#;
+        
+        let mut author_response = self.db.query_with_params(author_query, json!({
+            "author_id": &article.author_id
+        })).await?;
+        
+        let author_data: Vec<Value> = author_response.take(0)?;
+        let author_info = if let Some(author) = author_data.first() {
+            AuthorInfo {
+                id: author["id"].as_str().unwrap_or("").to_string(),
+                username: author["username"].as_str().unwrap_or("").to_string(),
+                display_name: author["display_name"].as_str().unwrap_or("").to_string(),
+                avatar_url: author["avatar_url"].as_str().map(String::from),
+                is_verified: author["is_verified"].as_bool().unwrap_or(false),
+            }
+        } else {
+            AuthorInfo {
+                id: article.author_id.clone(),
+                username: "unknown".to_string(),
+                display_name: "Unknown Author".to_string(),
+                avatar_url: None,
+                is_verified: false,
+            }
+        };
+        
+        // Get publication info if exists
+        let publication_info = if let Some(pub_id) = &article.publication_id {
+            let pub_query = r#"
+                SELECT id, name, slug, logo_url
+                FROM publication
+                WHERE id = $publication_id
+            "#;
+            
+            let mut pub_response = self.db.query_with_params(pub_query, json!({
+                "publication_id": pub_id
+            })).await?;
+            
+            let pub_data: Vec<Value> = pub_response.take(0)?;
+            pub_data.first().map(|p| PublicationInfo {
+                id: p["id"].as_str().unwrap_or("").to_string(),
+                name: p["name"].as_str().unwrap_or("").to_string(),
+                slug: p["slug"].as_str().unwrap_or("").to_string(),
+                logo_url: p["logo_url"].as_str().map(String::from),
+            })
+        } else {
+            None
+        };
+        
+        // Get tags info - 先获取article_tag关系，再获取tag详情
+        let tag_relations_query = "SELECT tag_id FROM article_tag WHERE article_id = $article_id";
+        
+        let mut tag_rel_response = self.db.query_with_params(tag_relations_query, json!({
+            "article_id": &article.id
+        })).await?;
+        
+        let tag_relations: Vec<Value> = tag_rel_response.take(0)?;
+        let mut tags: Vec<TagInfo> = Vec::new();
+        
+        for rel in tag_relations {
+            if let Some(tag_id) = rel.get("tag_id").and_then(|v| v.as_str()) {
+                // 获取tag详情
+                if let Ok(mut tag_response) = self.db.query(&format!("SELECT * FROM {}", tag_id)).await {
+                    if let Ok(tag_values) = tag_response.take::<Vec<Value>>(0) {
+                        if let Some(tag_value) = tag_values.first() {
+                            tags.push(TagInfo {
+                                id: tag_value.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                                name: tag_value.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                                slug: tag_value.get("slug").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        
+        Ok(ArticleListItem {
+            id: article.id.clone(),
+            title: article.title.clone(),
+            subtitle: article.subtitle.clone(),
+            slug: article.slug.clone(),
+            excerpt: article.excerpt.clone(),
+            cover_image_url: article.cover_image_url.clone(),
+            author: author_info,
+            publication: publication_info,
+            status: article.status.clone(),
+            is_paid_content: article.is_paid_content,
+            is_featured: article.is_featured,
+            reading_time: article.reading_time,
+            view_count: article.view_count,
+            clap_count: article.clap_count,
+            comment_count: article.comment_count,
+            tags,
+            created_at: article.created_at,
+            published_at: article.published_at,
+        })
     }
 }

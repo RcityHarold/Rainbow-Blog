@@ -8,9 +8,26 @@ use chrono::Utc;
 use serde_json::{json, Value};
 use std::sync::Arc;
 use std::collections::HashMap;
+use surrealdb::sql::Thing;
 use tracing::{debug, error, info};
 use validator::Validate;
 use uuid::Uuid;
+use serde::{Deserialize, Serialize};
+
+// 用于数据库插入的评论结构体（不包含时间戳字段，让数据库自动设置）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CommentInsert {
+    id: String,
+    article_id: String,
+    author_id: String,
+    parent_id: Option<String>,
+    content: String,
+    is_author_response: bool,
+    clap_count: i64,
+    is_edited: bool,
+    is_deleted: bool,
+    deleted_at: Option<String>,
+}
 
 #[derive(Clone)]
 pub struct CommentService {
@@ -22,12 +39,14 @@ impl CommentService {
         Ok(Self { db })
     }
 
+
     pub async fn create_comment(
         &self,
         user_id: &str,
         request: CreateCommentRequest,
     ) -> Result<Comment> {
         debug!("Creating comment for article: {}", request.article_id);
+        info!("Received article_id: '{}'", request.article_id);
 
         request
             .validate()
@@ -57,22 +76,50 @@ impl CommentService {
         // Check if this is an author response
         let is_author_response = article.author_id == user_id;
 
-        let comment = Comment {
-            id: Uuid::new_v4().to_string(),
-            article_id: request.article_id.clone(),
-            author_id: user_id.to_string(),
-            parent_id: request.parent_id,
-            content: request.content,
-            is_author_response,
-            clap_count: 0,
-            is_edited: false,
-            is_deleted: false,
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-            deleted_at: None,
-        };
+        let comment_id = Uuid::new_v4().to_string();
 
-        let created: Comment = self.db.create("comment", comment).await?;
+        // 使用 CREATE 语句创建评论，让数据库自动设置时间戳
+        let parent_id_clause = request.parent_id.as_ref()
+            .map(|p| format!(", parent_id = '{}'", p))
+            .unwrap_or_else(|| String::new());
+            
+        let query = format!(
+            "CREATE comment:`{}` SET article_id = '{}', author_id = '{}'{}, content = '{}', is_author_response = {}, clap_count = 0, is_edited = false, is_deleted = false",
+            comment_id,
+            request.article_id,
+            user_id,
+            parent_id_clause,
+            request.content.replace("'", "''"), // 转义单引号
+            is_author_response
+        );
+        
+        debug!("Creating comment with query: {}", query);
+        
+        // 执行 CREATE 语句
+        let mut response = self.db.storage.query(&query).await?;
+        
+        // SurrealDB 返回的是一个数组，即使只有一条记录
+        let results: Vec<serde_json::Value> = response.take(0)?;
+        debug!("Query results: {:?}", results);
+        
+        // 从数组中取出第一个元素
+        let mut created_value = results.into_iter().next()
+            .ok_or_else(|| AppError::Internal("Failed to create comment - no results returned".to_string()))?;
+            
+        // 处理 SurrealDB 的 Thing 格式的 ID
+        if let Some(id_obj) = created_value.get("id").and_then(|v| v.as_object()) {
+            if let Some(id_inner) = id_obj.get("id").and_then(|v| v.as_object()) {
+                if let Some(id_str) = id_inner.get("String").and_then(|v| v.as_str()) {
+                    // 将 id 替换为格式化的字符串
+                    created_value["id"] = json!(format!("comment:{}", id_str));
+                }
+            }
+        }
+        
+        debug!("Processed comment value: {:?}", created_value);
+            
+        let created: Comment = serde_json::from_value(created_value)
+            .map_err(|e| AppError::Internal(format!("Failed to deserialize comment: {}", e)))?;
 
         // Update article comment count
         self.update_article_comment_count(&request.article_id).await?;
@@ -368,12 +415,20 @@ impl CommentService {
     }
 
     async fn update_article_comment_count(&self, article_id: &str) -> Result<()> {
-        let query = r#"
-            LET $count = (SELECT count() FROM comment WHERE article_id = $article_id AND is_deleted = false);
-            UPDATE article SET comment_count = $count WHERE id = $article_id;
-        "#;
+        // 获取纯 ID（不带 table 前缀）
+        let pure_id = if article_id.starts_with("article:") {
+            &article_id[8..]
+        } else {
+            article_id
+        };
 
-        self.db.query_with_params(query, json!({
+        // 使用反引号包裹 ID（与 article.rs 保持一致）
+        let query = format!(r#"
+            LET $count = (SELECT count() FROM comment WHERE article_id = $article_id AND is_deleted = false);
+            UPDATE article:`{}` SET comment_count = $count;
+        "#, pure_id);
+
+        self.db.query_with_params(&query, json!({
             "article_id": article_id
         })).await?;
 

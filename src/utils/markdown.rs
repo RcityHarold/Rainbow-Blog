@@ -201,14 +201,48 @@ impl MarkdownProcessor {
     /// 估算阅读时间（分钟）
     pub fn estimate_reading_time(&self, markdown: &str) -> i32 {
         let word_count = self.count_words(markdown);
-        let words_per_minute = 200;
+        // 中文约300字/分钟，英文约200词/分钟
+        // 这里使用一个折中的值
+        let words_per_minute = 250;
         std::cmp::max(1, (word_count as i32 + words_per_minute - 1) / words_per_minute)
     }
     
     /// 计算字数
     pub fn count_words(&self, markdown: &str) -> usize {
         let text = self.to_text(markdown);
-        text.split_whitespace().count()
+        
+        // 同时支持中文和英文字数统计
+        let mut count = 0;
+        
+        // 统计中文字符
+        for ch in text.chars() {
+            if ch.is_ascii_alphanumeric() {
+                // 英文字符不单独计数，由下面的空格分隔统计
+                continue;
+            } else if ch >= '\u{4E00}' && ch <= '\u{9FFF}' {
+                // CJK 统一汉字基本块
+                count += 1;
+            } else if ch >= '\u{3400}' && ch <= '\u{4DBF}' {
+                // CJK 扩展A区
+                count += 1;
+            } else if ch >= '\u{AC00}' && ch <= '\u{D7AF}' {
+                // 韩文
+                count += 1;
+            } else if ch >= '\u{3040}' && ch <= '\u{309F}' {
+                // 日文平假名
+                count += 1;
+            } else if ch >= '\u{30A0}' && ch <= '\u{30FF}' {
+                // 日文片假名
+                count += 1;
+            }
+        }
+        
+        // 统计英文单词（空格分隔）
+        let english_words = text.split_whitespace()
+            .filter(|word| word.chars().any(|c| c.is_ascii_alphabetic()))
+            .count();
+        
+        count + english_words
     }
 
     /// 提取文章目录

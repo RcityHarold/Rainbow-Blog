@@ -1,5 +1,5 @@
 use crate::{
-    error::Result,
+    error::{AppError, Result},
     models::comment::*,
     services::AuthService,
     state::AppState,
@@ -18,10 +18,15 @@ pub fn router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/article/:article_id", get(get_article_comments))
         .route("/", post(create_comment))
+        .route("/test", post(test_create_comment))
         .route("/:id", put(update_comment))
         .route("/:id", delete(delete_comment))
         .route("/:id/clap", post(clap_comment))
         .route("/:id/clap", delete(remove_clap))
+        .layer(axum::middleware::from_fn(|req: axum::http::Request<axum::body::Body>, next: axum::middleware::Next<axum::body::Body>| async move {
+            tracing::info!("Comments router: {} {}", req.method(), req.uri().path());
+            next.run(req).await
+        }))
 }
 
 async fn get_article_comments(
@@ -43,9 +48,48 @@ async fn get_article_comments(
 
 async fn create_comment(
     State(state): State<Arc<AppState>>,
-    Extension(user): Extension<crate::services::auth::User>,
+    OptionalAuth(user): OptionalAuth,
     Json(request): Json<CreateCommentRequest>,
 ) -> Result<Json<Value>> {
+    tracing::info!("create_comment handler called");
+    tracing::info!("User from OptionalAuth: {:?}", user.is_some());
+    
+    let user = user
+        .ok_or_else(|| {
+            tracing::error!("User not authenticated");
+            AppError::unauthorized("Authentication required")
+        })?;
+    
+    tracing::info!("User ID: {}", user.id);
+    tracing::info!("Request: {:?}", request);
+    
+    match state.comment_service.create_comment(&user.id, request).await {
+        Ok(comment) => {
+            tracing::info!("Comment created successfully: {:?}", comment);
+            Ok(Json(json!({
+                "success": true,
+                "data": comment
+            })))
+        }
+        Err(e) => {
+            tracing::error!("Failed to create comment: {}", e);
+            Err(e)
+        }
+    }
+}
+
+async fn test_create_comment(
+    State(state): State<Arc<AppState>>,
+    OptionalAuth(user): OptionalAuth,
+    Json(request): Json<CreateCommentRequest>,
+) -> Result<Json<Value>> {
+    tracing::info!("test_create_comment handler called");
+    tracing::info!("User: {:?}", user);
+    tracing::info!("Request: {:?}", request);
+    
+    // 如果没有用户，返回错误
+    let user = user.ok_or_else(|| AppError::unauthorized("Authentication required"))?;
+    
     let comment = state
         .comment_service
         .create_comment(&user.id, request)
@@ -59,10 +103,12 @@ async fn create_comment(
 
 async fn update_comment(
     State(state): State<Arc<AppState>>,
-    Extension(user): Extension<crate::services::auth::User>,
+    OptionalAuth(user): OptionalAuth,
     Path(comment_id): Path<String>,
     Json(request): Json<UpdateCommentRequest>,
 ) -> Result<Json<Value>> {
+    let user = user.ok_or_else(|| AppError::unauthorized("Authentication required"))?;
+    
     let comment = state
         .comment_service
         .update_comment(&comment_id, &user.id, request)
@@ -76,9 +122,11 @@ async fn update_comment(
 
 async fn delete_comment(
     State(state): State<Arc<AppState>>,
-    Extension(user): Extension<crate::services::auth::User>,
+    OptionalAuth(user): OptionalAuth,
     Path(comment_id): Path<String>,
 ) -> Result<Json<Value>> {
+    let user = user.ok_or_else(|| AppError::unauthorized("Authentication required"))?;
+    
     state
         .comment_service
         .delete_comment(&comment_id, &user.id)
@@ -92,9 +140,11 @@ async fn delete_comment(
 
 async fn clap_comment(
     State(state): State<Arc<AppState>>,
-    Extension(user): Extension<crate::services::auth::User>,
+    OptionalAuth(user): OptionalAuth,
     Path(comment_id): Path<String>,
 ) -> Result<Json<Value>> {
+    let user = user.ok_or_else(|| AppError::unauthorized("Authentication required"))?;
+    
     state
         .comment_service
         .clap_comment(&comment_id, &user.id)
@@ -108,9 +158,11 @@ async fn clap_comment(
 
 async fn remove_clap(
     State(state): State<Arc<AppState>>,
-    Extension(user): Extension<crate::services::auth::User>,
+    OptionalAuth(user): OptionalAuth,
     Path(comment_id): Path<String>,
 ) -> Result<Json<Value>> {
+    let user = user.ok_or_else(|| AppError::unauthorized("Authentication required"))?;
+    
     state
         .comment_service
         .remove_clap(&comment_id, &user.id)
