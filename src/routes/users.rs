@@ -353,6 +353,9 @@ pub async fn get_user_profile_by_id(
         return Err(AppError::NotFound("User not found".to_string()));
     }
 
+    // 计算准确的文章数量（仅统计已发布且未删除）
+    let article_count = app_state.user_service.count_published_articles(&user_id).await?;
+
     // 获取用户最新文章
     let recent_articles_result = app_state.article_service.get_user_articles(
         &user_id,
@@ -375,8 +378,18 @@ pub async fn get_user_profile_by_id(
         Err(_) => vec![], // 如果获取文章失败，返回空数组
     };
 
+    // 实时校准粉丝/关注数
+    let follower_count = app_state.user_service.count_followers(&user_id).await?;
+    let following_count = app_state.user_service.count_following(&user_id).await?;
+
+    let mut profile_json = serde_json::to_value(profile.to_response())
+        .map_err(|e| AppError::internal(&format!("Serialize profile failed: {}", e)))?;
+    profile_json["article_count"] = json!(article_count);
+    profile_json["follower_count"] = json!(follower_count);
+    profile_json["following_count"] = json!(following_count);
+
     Ok(Json(json!({
-        "profile": profile.to_response(),
+        "profile": profile_json,
         "recent_articles": recent_articles
     })))
 }

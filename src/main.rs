@@ -200,6 +200,7 @@ async fn main() -> anyhow::Result<()> {
         .nest("/api/blog/stripe", routes::stripe::router())
         .nest("/api/blog/ws", routes::websocket::router())
         .nest("/api/blog/domains", routes::domain::router())
+        .nest("/api/blog/diagnostics", routes::diagnostics::router())
         
         // Health check endpoints (no domain context needed)
         .route("/health", get(health_check))

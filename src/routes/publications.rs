@@ -45,9 +45,10 @@ async fn get_publications(
 /// POST /api/publications
 async fn create_publication(
     State(state): State<Arc<AppState>>,
-    Extension(user): Extension<User>,
+    OptionalAuth(user): OptionalAuth,
     Json(request): Json<CreatePublicationRequest>,
 ) -> Result<Json<Value>> {
+    let user = user.ok_or_else(|| AppError::Authentication("Authentication required".to_string()))?;
     debug!("Creating publication: {} for user: {}", request.name, user.id);
 
     let publication = state

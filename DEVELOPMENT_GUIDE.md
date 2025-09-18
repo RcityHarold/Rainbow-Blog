@@ -69,6 +69,8 @@ Rainbow-Blog 是一个基于 Medium 风格的博客系统，完全复刻 Medium 
 - 付费订阅
 - 会员专属内容
 - 作者收益系统
+- Stripe 支付与 Connect 结算（详见 [docs/MEMBERSHIP_FLOW.md](docs/MEMBERSHIP_FLOW.md)）
+- 访问控制与内容预览逻辑
 
 ## 项目结构
 

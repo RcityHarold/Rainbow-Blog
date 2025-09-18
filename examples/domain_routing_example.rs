@@ -85,17 +85,18 @@ fn main() {
     show_handler_examples();
 
     println!("=== Configuration Examples ===\n");
-    
+
     show_configuration_examples();
 
     println!("=== Use Cases ===\n");
-    
+
     show_use_cases();
 }
 
 fn show_handler_examples() {
     println!("Handler using OptionalPublicationContext:");
-    println!(r#"
+    println!(
+        r#"
 async fn homepage(
     OptionalPublicationContext(context): OptionalPublicationContext,
 ) -> Result<Json<Value>> {{
@@ -119,10 +120,12 @@ async fn homepage(
         }}
     }}
 }}
-"#);
+"#
+    );
 
     println!("Handler using RequiredPublicationContext:");
-    println!(r#"
+    println!(
+        r#"
 async fn publication_articles(
     RequiredPublicationContext(context): RequiredPublicationContext,
 ) -> Result<Json<Value>> {{
@@ -135,7 +138,8 @@ async fn publication_articles(
         "articles": articles
     }})))
 }}
-"#);
+"#
+    );
 }
 
 fn show_configuration_examples() {
@@ -146,7 +150,8 @@ fn show_configuration_examples() {
     println!("AUTO_PROVISION_SSL=true\n");
 
     println!("Domain Service Configuration:");
-    println!(r#"
+    println!(
+        r#"
 let domain_config = DomainConfig {{
     base_domain: "platform.com".to_string(),
     dns_verification_timeout: 300,
@@ -155,7 +160,8 @@ let domain_config = DomainConfig {{
     auto_provision_ssl: true,
     ssl_webhook_url: Some("https://platform.com/ssl-webhook".to_string()),
 }};
-"#);
+"#
+    );
 }
 
 fn show_use_cases() {
@@ -164,19 +170,19 @@ fn show_use_cases() {
     println!("   - Custom domains supported for premium users");
     println!("   - Content filtered automatically by domain");
     println!();
-    
+
     println!("2. Corporate Blog Networks:");
     println!("   - Different departments get subdomains");
     println!("   - External blogs use custom domains");
     println!("   - Unified management through main platform");
     println!();
-    
+
     println!("3. White-label Solutions:");
     println!("   - Customers use their own domains");
     println!("   - Platform branding hidden on custom domains");
     println!("   - SSL certificates automatically provisioned");
     println!();
-    
+
     println!("4. Content Hub:");
     println!("   - Different content categories get subdomains");
     println!("   - Cross-publication content discovery");

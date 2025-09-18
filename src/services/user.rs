@@ -168,6 +168,59 @@ impl UserService {
         Ok(profiles.into_iter().next())
     }
 
+    /// 统计用户已发布且未删除的文章数量
+    pub async fn count_published_articles(&self, user_id: &str) -> Result<i64> {
+        let query = r#"
+            SELECT count() AS count 
+            FROM article 
+            WHERE author_id = $user_id 
+            AND is_deleted = false 
+            AND status = 'published'
+        "#;
+        let mut resp = self.db.query_with_params(query, json!({
+            "user_id": user_id
+        })).await?;
+        if let Ok(Some(row)) = resp.take::<Option<Value>>(0) {
+            Ok(row.get("count").and_then(|v| v.as_i64()).unwrap_or(0))
+        } else {
+            Ok(0)
+        }
+    }
+
+    /// 统计粉丝数量（关注该用户的人）
+    pub async fn count_followers(&self, user_id: &str) -> Result<i64> {
+        let query = r#"
+            SELECT count() AS count 
+            FROM follow 
+            WHERE following_id = $user_id
+        "#;
+        let mut resp = self.db.query_with_params(query, json!({
+            "user_id": user_id
+        })).await?;
+        if let Ok(Some(row)) = resp.take::<Option<Value>>(0) {
+            Ok(row.get("count").and_then(|v| v.as_i64()).unwrap_or(0))
+        } else {
+            Ok(0)
+        }
+    }
+
+    /// 统计关注数量（该用户关注了多少人）
+    pub async fn count_following(&self, user_id: &str) -> Result<i64> {
+        let query = r#"
+            SELECT count() AS count 
+            FROM follow 
+            WHERE follower_id = $user_id
+        "#;
+        let mut resp = self.db.query_with_params(query, json!({
+            "user_id": user_id
+        })).await?;
+        if let Ok(Some(row)) = resp.take::<Option<Value>>(0) {
+            Ok(row.get("count").and_then(|v| v.as_i64()).unwrap_or(0))
+        } else {
+            Ok(0)
+        }
+    }
+
     /// 根据用户名获取用户资料
     pub async fn get_profile_by_username(&self, username: &str) -> Result<Option<UserProfile>> {
         debug!("Getting user profile by username: {}", username);

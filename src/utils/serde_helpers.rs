@@ -34,7 +34,32 @@ pub mod thing_id {
                 match id {
                     serde_json::Value::String(s) => Ok(format!("{}:{}", tb, s)),
                     serde_json::Value::Number(n) => Ok(format!("{}:{}", tb, n)),
-                    _ => Ok(format!("{}:{}", tb, id)),
+                    serde_json::Value::Object(map) => {
+                        if let Some(value) = map.get("String").and_then(|v| v.as_str()) {
+                            return Ok(format!("{}:{}", tb, value));
+                        }
+                        if let Some(value) = map.get("id") {
+                            match value {
+                                serde_json::Value::String(s) => {
+                                    return Ok(format!("{}:{}", tb, s));
+                                }
+                                serde_json::Value::Object(inner) => {
+                                    if let Some(s) = inner.get("String").and_then(|v| v.as_str()) {
+                                        return Ok(format!("{}:{}", tb, s));
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                        if let Some((_, value)) = map.iter().find(|(k, _)| k.eq_ignore_ascii_case("string")) {
+                            if let Some(s) = value.as_str() {
+                                return Ok(format!("{}:{}", tb, s));
+                            }
+                        }
+                        let fallback = serde_json::to_string(&map).unwrap_or_default();
+                        Ok(format!("{}:{}", tb, fallback))
+                    }
+                    other => Ok(format!("{}:{}", tb, other)),
                 }
             }
         }

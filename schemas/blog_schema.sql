@@ -302,6 +302,9 @@ DEFINE FIELD user_id ON publication_member TYPE string ASSERT $value != NONE;
 DEFINE FIELD role ON publication_member TYPE string DEFAULT "writer" ASSERT $value INSIDE ["owner", "editor", "writer"];
 DEFINE FIELD permissions ON publication_member TYPE array<string> DEFAULT ["article.write"];
 DEFINE FIELD invited_by ON publication_member TYPE string ASSERT $value != NONE;
+-- 兼容后端模型，增加 joined_at 与 is_active 字段
+DEFINE FIELD joined_at ON publication_member TYPE datetime DEFAULT time::now();
+DEFINE FIELD is_active ON publication_member TYPE bool DEFAULT true;
 DEFINE FIELD accepted_at ON publication_member TYPE option<datetime>;
 DEFINE FIELD created_at ON publication_member TYPE datetime DEFAULT time::now();
 DEFINE FIELD updated_at ON publication_member TYPE datetime DEFAULT time::now();

@@ -37,31 +37,79 @@ impl PublicationService {
         // 生成唯一slug
         let slug = self.generate_unique_slug(&request.name).await?;
 
-        let publication = Publication {
-            id: Uuid::new_v4().to_string(),
-            name: request.name,
-            slug,
-            description: request.description,
-            tagline: request.tagline,
-            logo_url: request.logo_url,
-            cover_image_url: request.cover_image_url,
-            owner_id: owner_id.to_string(),
-            homepage_layout: request.homepage_layout.unwrap_or_else(|| "default".to_string()),
-            theme_color: request.theme_color.unwrap_or_else(|| "#1a1a1a".to_string()),
-            custom_domain: request.custom_domain,
-            member_count: 1, // Owner is the first member
-            article_count: 0,
-            follower_count: 0,
-            is_verified: false,
-            is_suspended: false,
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
+        // 使用 SQL 显式创建记录并用 time::now() 设置时间字段，避免 SurrealDB 类型不匹配
+        let id = Uuid::new_v4().to_string();
+        // 校验并规范 homepage_layout，限定为 ['grid', 'list', 'magazine']，默认使用 'grid'
+        let homepage_layout = match request.homepage_layout {
+            Some(layout) => {
+                let l = layout.to_lowercase();
+                let allowed = ["grid", "list", "magazine"];
+                if !allowed.contains(&l.as_str()) {
+                    return Err(AppError::BadRequest(
+                        "homepage_layout 必须是 'grid' | 'list' | 'magazine'".into(),
+                    ));
+                }
+                l
+            }
+            None => "grid".to_string(),
         };
+        let theme_color = request
+            .theme_color
+            .unwrap_or_else(|| "#1a1a1a".to_string());
 
-        let created_publication: Publication = self.db.create("publication", publication).await?;
+        let sql = r#"
+            CREATE publication SET
+                id = type::thing('publication', $id),
+                name = $name,
+                slug = $slug,
+                description = $description,
+                tagline = $tagline,
+                logo_url = $logo_url,
+                cover_image_url = $cover_image_url,
+                owner_id = $owner_id,
+                homepage_layout = $homepage_layout,
+                theme_color = $theme_color,
+                custom_domain = $custom_domain,
+                member_count = 1,
+                article_count = 0,
+                follower_count = 0,
+                is_verified = false,
+                is_suspended = false,
+                created_at = time::now(),
+                updated_at = time::now();
+
+            SELECT type::string(id) AS id,
+                   name, slug, description, tagline, logo_url, cover_image_url,
+                   owner_id, homepage_layout, theme_color, custom_domain,
+                   member_count, article_count, follower_count, is_verified, is_suspended,
+                   created_at, updated_at
+            FROM publication
+            WHERE id = type::thing('publication', $id);
+        "#;
+
+        let params = json!({
+            "id": id,
+            "name": request.name,
+            "slug": slug,
+            "description": request.description,
+            "tagline": request.tagline,
+            "logo_url": request.logo_url,
+            "cover_image_url": request.cover_image_url,
+            "owner_id": owner_id,
+            "homepage_layout": homepage_layout,
+            "theme_color": theme_color,
+            "custom_domain": request.custom_domain,
+        });
+
+        let mut resp = self.db.query_with_params(sql, params).await?;
+        // 结果集 0 是 CREATE，结果集 1 是 SELECT 的结构化返回
+        let mut created_vec: Vec<Publication> = resp.take(1)?;
+        let created_publication = created_vec
+            .pop()
+            .ok_or_else(|| AppError::internal("Failed to create publication"))?;
 
         // 添加创建者为Owner
-        self.add_member_internal(&created_publication.id, owner_id, MemberRole::Owner).await?;
+        self.add_member_internal(&created_publication.id, owner_id, MemberRole::Owner, owner_id).await?;
 
         info!("Created publication: {} ({})", created_publication.name, created_publication.id);
         Ok(created_publication)
@@ -75,9 +123,23 @@ impl PublicationService {
     ) -> Result<Option<PublicationResponse>> {
         debug!("Getting publication: {}", slug);
 
-        let publication: Option<Publication> = self.db.find_one("publication", "slug", slug).await?;
-        
-        let publication = match publication {
+        // 使用显式查询并将 id 转换为字符串，避免 Surreal record -> String 反序列化问题
+        let query = r#"
+            SELECT 
+                type::string(id) AS id,
+                name, slug, description, tagline, logo_url, cover_image_url,
+                owner_id, homepage_layout, theme_color, custom_domain,
+                member_count, article_count, follower_count,
+                is_verified, is_suspended,
+                created_at, updated_at
+            FROM publication
+            WHERE slug = $slug
+            LIMIT 1
+        "#;
+
+        let mut resp = self.db.query_with_params(query, json!({"slug": slug})).await?;
+        let mut items: Vec<Publication> = resp.take(0)?;
+        let publication = match items.pop() {
             Some(p) if !p.is_suspended => p,
             Some(_) => return Ok(None), // 被暂停的出版物不可见
             None => return Ok(None),
@@ -152,7 +214,14 @@ impl PublicationService {
         }
         
         if let Some(homepage_layout) = request.homepage_layout {
-            publication.homepage_layout = homepage_layout;
+            let l = homepage_layout.to_lowercase();
+            let allowed = ["grid", "list", "magazine"];
+            if !allowed.contains(&l.as_str()) {
+                return Err(AppError::BadRequest(
+                    "homepage_layout 必须是 'grid' | 'list' | 'magazine'".into(),
+                ));
+            }
+            publication.homepage_layout = l;
         }
         
         if let Some(theme_color) = request.theme_color {
@@ -228,7 +297,10 @@ impl PublicationService {
 
         let count_query = format!("SELECT count() AS total FROM publication WHERE {}", where_clause);
         let data_query = format!(
-            "SELECT id, name, slug, description, tagline, logo_url, cover_image_url, member_count, article_count, follower_count, is_verified, created_at 
+            "SELECT 
+                type::string(id) AS id, 
+                name, slug, description, tagline, logo_url, cover_image_url, 
+                member_count, article_count, follower_count, is_verified, created_at 
              FROM publication 
              WHERE {} 
              ORDER BY {} 
@@ -337,7 +409,7 @@ impl PublicationService {
             return Err(AppError::Conflict("User is already a member".to_string()));
         }
 
-        let member = self.add_member_internal(publication_id, &request.user_id, request.role).await?;
+        let member = self.add_member_internal(publication_id, &request.user_id, request.role, requester_id).await?;
 
         // 更新成员数量
         self.update_member_count(publication_id).await?;
@@ -557,18 +629,52 @@ impl PublicationService {
         publication_id: &str,
         user_id: &str,
         role: MemberRole,
+        invited_by: &str,
     ) -> Result<PublicationMember> {
-        let member = PublicationMember {
-            id: Uuid::new_v4().to_string(),
-            publication_id: publication_id.to_string(),
-            user_id: user_id.to_string(),
-            role: role.clone(),
-            permissions: role.default_permissions(),
-            joined_at: Utc::now(),
-            is_active: true,
+        // 使用 SQL 显式设置 joined_at 为 time::now()，避免时间类型不匹配
+        let id = Uuid::new_v4().to_string();
+        let permissions = role.default_permissions();
+        let role_str = match role {
+            MemberRole::Owner => "owner",
+            MemberRole::Editor => "editor",
+            MemberRole::Writer => "writer",
+            MemberRole::Contributor => "writer",
         };
 
-        let created: PublicationMember = self.db.create("publication_member", member).await?;
+        let sql = r#"
+            CREATE publication_member CONTENT {
+                id: type::thing('publication_member', $id),
+                publication_id: type::thing('publication', string::split($publication_id, ':')[1] ?: $publication_id),
+                user_id: $user_id,
+                role: $role,
+                permissions: $permissions,
+                invited_by: $invited_by
+            }
+            RETURN 
+                type::string(id) AS id,
+                type::string(publication_id) AS publication_id,
+                user_id,
+                IF role = 'owner' THEN 'Owner' ELSE IF role = 'editor' THEN 'Editor' ELSE 'Writer' END AS role,
+                permissions,
+                joined_at,
+                is_active;
+        "#;
+
+        let params = json!({
+            "id": id,
+            "publication_id": publication_id,
+            "user_id": user_id,
+            "role": role_str,
+            "permissions": permissions,
+            "invited_by": invited_by,
+        });
+
+        let mut resp = self.db.query_with_params(sql, params).await?;
+        // 单条 CREATE ... RETURN 语句，数据在索引 0
+        let mut created_vec: Vec<PublicationMember> = resp.take(0)?;
+        let created = created_vec
+            .pop()
+            .ok_or_else(|| AppError::internal("Failed to create publication member"))?;
         Ok(created)
     }
 

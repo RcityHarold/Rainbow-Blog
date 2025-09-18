@@ -373,8 +373,7 @@ impl CommentService {
         comments: Vec<Comment>,
         user_id: Option<&str>,
     ) -> Result<Vec<CommentWithAuthor>> {
-        let mut comment_map: HashMap<String, CommentWithAuthor> = HashMap::new();
-        let mut root_comments = Vec::new();
+        let mut nodes: HashMap<String, CommentWithAuthor> = HashMap::new();
 
         // Get all author information
         let author_ids: Vec<&str> = comments.iter().map(|c| c.author_id.as_str()).collect();
@@ -387,37 +386,53 @@ impl CommentService {
             HashMap::new()
         };
 
-        // Build comment nodes
-        for comment in comments {
+        // Prepare nodes map with empty replies
+        for comment in comments.into_iter() {
             let author_info = authors.get(&comment.author_id).cloned().unwrap_or_default();
             let user_has_clapped = user_claps.get(&comment.id).copied().unwrap_or(false);
 
-            let comment_with_author = CommentWithAuthor {
-                comment: comment.clone(),
-                author_name: author_info.0,
-                author_username: author_info.1,
-                author_avatar: author_info.2,
-                user_has_clapped,
-                replies: Vec::new(),
-            };
-
-            comment_map.insert(comment.id.clone(), comment_with_author);
+            nodes.insert(
+                comment.id.clone(),
+                CommentWithAuthor {
+                    comment: comment.clone(),
+                    author_name: author_info.0,
+                    author_username: author_info.1,
+                    author_avatar: author_info.2,
+                    user_has_clapped,
+                    replies: Vec::new(),
+                },
+            );
         }
 
-        // Build tree structure
-        let mut comment_map_clone = comment_map.clone();
-        for (id, mut comment) in comment_map {
-            if let Some(parent_id) = &comment.comment.parent_id {
-                if let Some(parent) = comment_map_clone.get_mut(parent_id) {
-                    parent.replies.push(comment);
+        // Attach children to parents by moving children out of the map
+        let ids: Vec<String> = nodes.keys().cloned().collect();
+        for id in ids {
+            // Clone parent_id to avoid borrow issues
+            let parent_id_opt = nodes.get(&id).and_then(|n| n.comment.parent_id.clone());
+            if let Some(parent_id) = parent_id_opt {
+                if parent_id != id {
+                    if let Some(child) = nodes.remove(&id) {
+                        if let Some(parent) = nodes.get_mut(&parent_id) {
+                            parent.replies.push(child);
+                        } else {
+                            // Parent not found (shouldn't happen); place back as root
+                            nodes.insert(id, child);
+                        }
+                    }
                 }
-            } else {
-                root_comments.push(comment);
             }
         }
 
-        // Sort by creation date
+        // Remaining entries in the map are roots with populated replies
+        let mut root_comments: Vec<CommentWithAuthor> = nodes.into_values().collect();
+
+        // Sort roots by creation date (desc)
         root_comments.sort_by(|a, b| b.comment.created_at.cmp(&a.comment.created_at));
+
+        // Recursively sort replies of all nodes by creation date (desc)
+        for root in &mut root_comments {
+            sort_replies_by_time_desc(root);
+        }
 
         Ok(root_comments)
     }
@@ -517,5 +532,13 @@ impl CommentService {
         })).await?;
 
         Ok(())
+    }
+}
+
+// Helper: recursively sort replies by created_at desc
+fn sort_replies_by_time_desc(node: &mut crate::models::comment::CommentWithAuthor) {
+    node.replies.sort_by(|a, b| b.comment.created_at.cmp(&a.comment.created_at));
+    for child in &mut node.replies {
+        sort_replies_by_time_desc(child);
     }
 }

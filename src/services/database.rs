@@ -130,7 +130,9 @@ impl Database {
 
     /// 通过ID删除记录
     pub async fn delete_by_id(&self, table: &str, id: &str) -> Result<()> {
-        let thing = Thing::from((table, id));
+        let prefix = format!("{}:", table);
+        let pure_id = if id.starts_with(&prefix) { &id[prefix.len()..] } else { id };
+        let thing = Thing::from((table, pure_id));
         self.delete(thing).await
     }
 
@@ -161,7 +163,9 @@ impl Database {
     where
         T: Serialize + for<'de> Deserialize<'de> + Send + Sync + Debug,
     {
-        let thing = Thing::from((table, id));
+        let prefix = format!("{}:", table);
+        let pure_id = if id.starts_with(&prefix) { &id[prefix.len()..] } else { id };
+        let thing = Thing::from((table, pure_id));
         self.update(thing, data).await
     }
 
@@ -170,7 +174,10 @@ impl Database {
     where
         T: for<'de> Deserialize<'de> + Send + Sync + Debug,
     {
-        let query = format!("UPDATE {}:{} MERGE $updates RETURN *", table, id);
+        // 获取纯 ID（不带 table 前缀），并用反引号包裹，兼容包含连字符的 ID
+        let prefix = format!("{}:", table);
+        let pure_id = if id.starts_with(&prefix) { &id[prefix.len()..] } else { id };
+        let query = format!("UPDATE {}:`{}` MERGE $updates RETURN *", table, pure_id);
         let mut response = self.query_with_params(&query, json!({"updates": updates})).await?;
         let results: Vec<T> = response.take(0)?;
         Ok(results.into_iter().next())

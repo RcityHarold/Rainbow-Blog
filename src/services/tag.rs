@@ -6,6 +6,7 @@ use crate::{
 };
 use chrono::Utc;
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::{debug, info};
 use validator::Validate;
@@ -70,41 +71,50 @@ impl TagService {
         let page = query.page.unwrap_or(1).max(1);
         let limit = query.limit.unwrap_or(20).min(100);
         let offset = (page - 1) * limit;
+        let mut sql = String::from(
+            "SELECT id, name, slug, description, follower_count, article_count, is_featured, created_at, updated_at FROM tag"
+        );
+        let mut conditions: Vec<String> = Vec::new();
+        let mut params = serde_json::Map::new();
 
-        let mut sql = String::from("SELECT * FROM tag WHERE 1=1");
-        let mut bindings = vec![];
-
-        // Add search condition
         if let Some(search) = &query.search {
-            sql.push_str(" AND (name CONTAINS $search OR description CONTAINS $search)");
-            bindings.push(("search", json!(search)));
+            conditions.push("(name CONTAINS $search OR description CONTAINS $search)".to_string());
+            params.insert("search".to_string(), json!(search));
         }
 
-        // Add featured filter
         if query.featured_only.unwrap_or(false) {
-            sql.push_str(" AND is_featured = true");
+            conditions.push("is_featured = true".to_string());
         }
 
-        // Add sorting
+        if !conditions.is_empty() {
+            sql.push_str(" WHERE ");
+            sql.push_str(&conditions.join(" AND "));
+        }
+
         match query.sort_by.as_deref() {
             Some("popular") => sql.push_str(" ORDER BY article_count DESC"),
             Some("name") => sql.push_str(" ORDER BY name ASC"),
             Some("created_at") => sql.push_str(" ORDER BY created_at DESC"),
-            _ => sql.push_str(" ORDER BY article_count DESC"), // Default to popular
+            _ => sql.push_str(" ORDER BY article_count DESC"),
         }
 
-        // Add pagination
         sql.push_str(" LIMIT $limit START $offset");
-        bindings.push(("limit", json!(limit)));
-        bindings.push(("offset", json!(offset)));
+        params.insert("limit".to_string(), json!(limit));
+        params.insert("offset".to_string(), json!(offset));
 
-        let mut params = serde_json::Map::new();
-        for (key, value) in bindings {
-            params.insert(key.to_string(), value);
+        let mut response = self
+            .db
+            .query_with_params(&sql, json!(params))
+            .await?;
+        let mut tags: Vec<Tag> = response.take(0)?;
+
+        self.populate_tag_counts(&mut tags).await?;
+
+        match query.sort_by.as_deref() {
+            Some("name") => tags.sort_by(|a, b| a.name.cmp(&b.name)),
+            Some("created_at") => tags.sort_by(|a, b| b.created_at.cmp(&a.created_at)),
+            _ => tags.sort_by(|a, b| b.article_count.cmp(&a.article_count)),
         }
-        
-        let mut response = self.db.query_with_params(&sql, json!(params)).await?;
-        let tags: Vec<Tag> = response.take(0)?;
 
         Ok(tags)
     }
@@ -115,11 +125,16 @@ impl TagService {
     }
 
     pub async fn get_tag_by_slug(&self, slug: &str) -> Result<Option<Tag>> {
-        let mut response = self.db.query_with_params(
-            "SELECT * FROM tag WHERE slug = $slug",
-            json!({ "slug": slug })
-        ).await?;
-        let tags: Vec<Tag> = response.take(0)?;
+        let sql = r#"
+            SELECT id, name, slug, description, follower_count, article_count, is_featured, created_at, updated_at
+            FROM tag WHERE slug = $slug LIMIT 1
+        "#;
+        let mut response = self.db.query_with_params(sql, json!({"slug": slug})).await?;
+        let mut tags: Vec<Tag> = response.take(0)?;
+
+        if let Some(tag) = tags.get_mut(0) {
+            self.populate_tag_counts(std::slice::from_mut(tag)).await?;
+        }
 
         Ok(tags.into_iter().next())
     }
@@ -211,6 +226,8 @@ impl TagService {
     pub async fn add_tags_to_article(&self, article_id: &str, tag_ids: Vec<String>) -> Result<()> {
         debug!("Adding {} tags to article: {}", tag_ids.len(), article_id);
 
+        let normalized_article_id = normalize_surreal_id(article_id);
+
         for tag_id in tag_ids {
             // Check if tag exists
             let tag: Option<Tag> = self.db.get_by_id("tag", &tag_id).await?;
@@ -218,32 +235,37 @@ impl TagService {
                 return Err(AppError::NotFound(format!("Tag {} not found", tag_id)));
             }
 
+            let normalized_tag_id = normalize_surreal_id(&tag_id);
+
             // Check if association already exists
             let mut response = self.db.query_with_params(
                 r#"
                     SELECT * FROM article_tag 
-                    WHERE article_id = $article_id 
-                    AND tag_id = $tag_id
+                    WHERE article_id = type::thing('article', $aid) 
+                    AND tag_id = type::thing('tag', $tid)
                 "#,
                 json!({
-                    "article_id": article_id,
-                    "tag_id": &tag_id
+                    "aid": normalized_article_id,
+                    "tid": normalized_tag_id
                 })
             ).await?;
             let existing: Vec<ArticleTag> = response.take(0)?;
 
             if existing.is_empty() {
-                let article_tag = ArticleTag {
-                    id: Uuid::new_v4().to_string(),
-                    article_id: article_id.to_string(),
-                    tag_id: tag_id.clone(),
-                    created_at: Utc::now(),
-                };
-
-                self.db.create("article_tag", article_tag).await?;
+                let create_query = r#"
+                    CREATE article_tag SET 
+                        article_id = type::thing('article', $aid),
+                        tag_id = type::thing('tag', $tid)
+                "#;
+                self.db
+                    .query_with_params(create_query, json!({
+                        "aid": normalized_article_id,
+                        "tid": normalized_tag_id
+                    }))
+                    .await?;
 
                 // Update tag article count
-                self.update_tag_article_count(&tag_id).await?;
+                self.update_tag_article_count(&normalized_tag_id).await?;
             }
         }
 
@@ -257,21 +279,25 @@ impl TagService {
     ) -> Result<()> {
         debug!("Removing {} tags from article: {}", tag_ids.len(), article_id);
 
+        let normalized_article_id = normalize_surreal_id(article_id);
+
         for tag_id in tag_ids {
+            let normalized_tag_id = normalize_surreal_id(&tag_id);
+
             self.db.query_with_params(
                 r#"
                     DELETE article_tag 
-                    WHERE article_id = $article_id 
-                    AND tag_id = $tag_id
+                    WHERE article_id = type::thing('article', $aid) 
+                    AND tag_id = type::thing('tag', $tid)
                 "#,
                 json!({
-                    "article_id": article_id,
-                    "tag_id": &tag_id
+                    "aid": normalized_article_id,
+                    "tid": normalized_tag_id
                 })
             ).await?;
 
             // Update tag article count
-            self.update_tag_article_count(&tag_id).await?;
+            self.update_tag_article_count(&normalized_tag_id).await?;
         }
 
         Ok(())
@@ -372,13 +398,31 @@ impl TagService {
         Ok(tags)
     }
 
+    /// 获取用户关注的标签ID集合（标准化为字符串形式，兼容 Surreal 记录格式）
+    pub async fn get_followed_tag_id_set(&self, user_id: &str) -> Result<std::collections::HashSet<String>> {
+        let sql = r#"
+            SELECT string::replace(string::replace(type::string(tag_id), '⟨', ''), '⟩', '') AS tid
+            FROM user_tag_follow
+            WHERE user_id = $user_id
+        "#;
+
+        let mut resp = self.db.query_with_params(sql, json!({"user_id": user_id})).await?;
+        let rows: Vec<Value> = resp.take(0)?;
+        let set = rows.into_iter()
+            .filter_map(|v| v.get("tid").and_then(|x| x.as_str()).map(|s| s.to_string()))
+            .collect();
+        Ok(set)
+    }
+
     pub async fn get_tags_with_follow_status(
         &self,
         user_id: Option<&str>,
         tag_ids: Vec<String>,
     ) -> Result<Vec<TagWithFollowStatus>> {
+        // 兼容 Surreal record(id) 与传入字符串 id（例如 "tag:uuid"）的比较
+        // 使用 type::string(id) 进行 IN 过滤
         let mut response = self.db.query_with_params(
-            "SELECT * FROM tag WHERE id IN $tag_ids",
+            "SELECT * FROM tag WHERE string::replace(string::replace(type::string(id), '⟨', ''), '⟩', '') IN $tag_ids",
             json!({ "tag_ids": tag_ids.clone() })
         ).await?;
         let tags: Vec<Tag> = response.take(0)?;
@@ -386,11 +430,12 @@ impl TagService {
         let mut result = Vec::new();
 
         if let Some(uid) = user_id {
+            // 同理，user_tag_follow.tag_id 是 record(tag)，改用 type::string(tag_id) 进行 IN 过滤
             let mut response = self.db.query_with_params(
                 r#"
                     SELECT * FROM user_tag_follow 
                     WHERE user_id = $user_id 
-                    AND tag_id IN $tag_ids
+                    AND string::replace(string::replace(type::string(tag_id), '⟨', ''), '⟩', '') IN $tag_ids
                 "#,
                 json!({
                     "user_id": uid,
@@ -420,29 +465,173 @@ impl TagService {
         Ok(result)
     }
 
-    async fn update_tag_article_count(&self, tag_id: &str) -> Result<()> {
-        let query = r#"
-            LET $count = (SELECT count() FROM article_tag WHERE tag_id = $tag_id);
-            UPDATE tag SET article_count = $count WHERE id = $tag_id;
-        "#;
+    async fn populate_tag_counts(&self, tags: &mut [Tag]) -> Result<()> {
+        if tags.is_empty() {
+            return Ok(());
+        }
 
-        self.db.query_with_params(query, json!({
-            "tag_id": tag_id
-        })).await?;
+        let mut normalized_ids: Vec<String> = tags
+            .iter()
+            .map(|tag| normalize_surreal_id(&tag.id))
+            .collect();
+        normalized_ids.sort();
+        normalized_ids.dedup();
+
+        let article_counts = self
+            .fetch_relation_counts("article_tag", "tag_id", &normalized_ids)
+            .await?;
+        let follower_counts = self
+            .fetch_relation_counts("user_tag_follow", "tag_id", &normalized_ids)
+            .await?;
+
+        for tag in tags.iter_mut() {
+            let key = normalize_surreal_id(&tag.id);
+            tag.article_count = *article_counts.get(&key).unwrap_or(&0);
+            tag.follower_count = *follower_counts.get(&key).unwrap_or(&0);
+        }
+
+        Ok(())
+    }
+
+    async fn fetch_relation_counts(
+        &self,
+        table: &str,
+        field: &str,
+        ids: &[String],
+    ) -> Result<HashMap<String, i64>> {
+        if ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        let field_expr = format!(
+            "string::split(string::replace(string::replace(type::string({}), '⟨', ''), '⟩', ''), ':')[1]",
+            field
+        );
+        let sql = format!(
+            "SELECT {expr} AS tid FROM {table} WHERE {expr} IN $ids",
+            expr = field_expr,
+            table = table
+        );
+
+        let mut response = self
+            .db
+            .query_with_params(&sql, json!({ "ids": ids }))
+            .await?;
+
+        let rows: Vec<Value> = response.take(0)?;
+        let mut map = HashMap::new();
+        for row in rows {
+            if let Some(raw_tid) = row.get("tid") {
+                if let Some(tid) = extract_id_from_value(raw_tid) {
+                    *map.entry(tid).or_insert(0) += 1;
+                }
+            }
+        }
+
+        Ok(map)
+    }
+
+    async fn update_tag_article_count(&self, tag_id: &str) -> Result<()> {
+        let normalized = normalize_surreal_id(tag_id);
+        let counts = self
+            .fetch_relation_counts("article_tag", "tag_id", &[normalized.clone()])
+            .await?;
+        let count = *counts.get(&normalized).unwrap_or(&0);
+
+        let update_sql = r#"UPDATE type::thing('tag', $tag_id) SET article_count = $count"#;
+
+        self.db
+            .query_with_params(update_sql, json!({
+                "count": count,
+                "tag_id": normalized
+            }))
+            .await?;
 
         Ok(())
     }
 
     async fn update_tag_follower_count(&self, tag_id: &str) -> Result<()> {
-        let query = r#"
-            LET $count = (SELECT count() FROM user_tag_follow WHERE tag_id = $tag_id);
-            UPDATE tag SET follower_count = $count WHERE id = $tag_id;
-        "#;
+        let normalized = normalize_surreal_id(tag_id);
+        let counts = self
+            .fetch_relation_counts("user_tag_follow", "tag_id", &[normalized.clone()])
+            .await?;
+        let count = *counts.get(&normalized).unwrap_or(&0);
 
-        self.db.query_with_params(query, json!({
-            "tag_id": tag_id
-        })).await?;
+        let update_sql = r#"UPDATE type::thing('tag', $tag_id) SET follower_count = $count"#;
+
+        self.db
+            .query_with_params(update_sql, json!({
+                "count": count,
+                "tag_id": normalized
+            }))
+            .await?;
 
         Ok(())
+    }
+}
+
+fn normalize_surreal_id(id: &str) -> String {
+    fn try_from_json_str(s: &str) -> Option<String> {
+        serde_json::from_str::<Value>(s)
+            .ok()
+            .and_then(|v| extract_id_from_json_value(&v))
+    }
+
+    fn extract_id_from_json_value(value: &Value) -> Option<String> {
+        match value {
+            Value::String(s) => Some(s.clone()),
+            Value::Object(map) => {
+                if let Some(Value::String(s)) = map.get("String") {
+                    return Some(s.clone());
+                }
+                if let Some(Value::String(s)) = map.get("id") {
+                    return Some(s.clone());
+                }
+                if let Some(Value::Object(inner)) = map.get("id") {
+                    if let Some(Value::String(s)) = inner.get("String") {
+                        return Some(s.clone());
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
+    let trimmed = id.trim();
+    if let Some(res) = try_from_json_str(trimmed) {
+        return res;
+    }
+
+    let cleaned = trimmed.replace('⟨', "").replace('⟩', "");
+    if let Some(res) = try_from_json_str(&cleaned) {
+        return res;
+    }
+
+    if let Some((_, rest)) = cleaned.split_once(':') {
+        if let Some(res) = try_from_json_str(rest) {
+            return res;
+        }
+        return rest.trim_matches('"').to_string();
+    }
+
+    cleaned.trim_matches('"').to_string()
+}
+
+fn extract_id_from_value(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::String(s) => Some(normalize_surreal_id(s)),
+        serde_json::Value::Object(map) => {
+            if let Some(serde_json::Value::String(s)) = map.get("String") {
+                return Some(normalize_surreal_id(s));
+            }
+            if let Some(serde_json::Value::Object(inner)) = map.get("id") {
+                if let Some(serde_json::Value::String(s)) = inner.get("String") {
+                    return Some(normalize_surreal_id(s));
+                }
+            }
+            None
+        }
+        _ => None,
     }
 }

@@ -38,20 +38,22 @@ async fn get_tags(
 
     let tags = state.tag_service.get_tags(query).await?;
 
-    // If user is authenticated, get follow status
-    let tags_response = if let Some(user) = user {
-        let tag_ids: Vec<String> = tags.iter().map(|t| t.id.clone()).collect();
-        state
+    // If user is authenticated, compute follow status using ID set, but保留原始 tags 列表，避免二次查询引起的类型不匹配
+    let tags_response: Vec<TagWithFollowStatus> = if let Some(user) = user {
+        let followed = state
             .tag_service
-            .get_tags_with_follow_status(Some(&user.id), tag_ids)
-            .await?
-    } else {
+            .get_followed_tag_id_set(&user.id)
+            .await?;
         tags.into_iter()
             .map(|tag| TagWithFollowStatus {
+                is_following: followed.contains(&tag.id),
                 tag,
-                is_following: false,
             })
-            .collect()
+            .collect::<Vec<TagWithFollowStatus>>()
+    } else {
+        tags.into_iter()
+            .map(|tag| TagWithFollowStatus { tag, is_following: false })
+            .collect::<Vec<TagWithFollowStatus>>()
     };
 
     Ok(Json(json!({

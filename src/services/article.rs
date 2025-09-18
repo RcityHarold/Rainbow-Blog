@@ -19,6 +19,54 @@ pub struct ArticleService {
     markdown_processor: MarkdownProcessor,
 }
 
+fn normalize_surreal_id(id: &str) -> String {
+    fn try_from_json_str(s: &str) -> Option<String> {
+        serde_json::from_str::<serde_json::Value>(s)
+            .ok()
+            .and_then(|v| extract_id_from_json_value(&v))
+    }
+
+    fn extract_id_from_json_value(value: &serde_json::Value) -> Option<String> {
+        match value {
+            serde_json::Value::String(s) => Some(s.clone()),
+            serde_json::Value::Object(map) => {
+                if let Some(serde_json::Value::String(s)) = map.get("String") {
+                    return Some(s.clone());
+                }
+                if let Some(serde_json::Value::String(s)) = map.get("id") {
+                    return Some(s.clone());
+                }
+                if let Some(serde_json::Value::Object(inner)) = map.get("id") {
+                    if let Some(serde_json::Value::String(s)) = inner.get("String") {
+                        return Some(s.clone());
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
+    let trimmed = id.trim();
+    if let Some(res) = try_from_json_str(trimmed) {
+        return res;
+    }
+
+    let cleaned = trimmed.replace('⟨', "").replace('⟩', "");
+    if let Some(res) = try_from_json_str(&cleaned) {
+        return res;
+    }
+
+    if let Some((_, rest)) = cleaned.split_once(':') {
+        if let Some(res) = try_from_json_str(rest) {
+            return res;
+        }
+        return rest.trim_matches('"').to_string();
+    }
+
+    cleaned.trim_matches('"').to_string()
+}
+
 impl ArticleService {
     pub async fn new(db: Arc<Database>) -> Result<Self> {
         let markdown_processor = MarkdownProcessor::new();
@@ -624,21 +672,57 @@ impl ArticleService {
     async fn attach_tags_to_article(&self, article_id: &str, tags: &[String]) -> Result<()> {
         debug!("Attaching {} tags to article: {}", tags.len(), article_id);
 
-        // 清理现有标签
-        let clear_query = "DELETE article_tag WHERE article_id = $article_id";
-        self.db.query_with_params(clear_query, json!({ "article_id": article_id })).await?;
+        let normalized_article_id = normalize_surreal_id(article_id);
+
+        // 清理现有标签（规范为 record 类型进行匹配）
+        let clear_query = r#"
+            DELETE article_tag 
+            WHERE article_id = type::thing('article', $aid)
+        "#;
+        self.db
+            .query_with_params(clear_query, json!({ "aid": normalized_article_id }))
+            .await?;
 
         // 添加新标签
         for tag_name in tags {
             // 获取或创建标签
             let tag_id = self.get_or_create_tag(tag_name).await?;
-            
-            // 创建关联
-            let create_query = "CREATE article_tag SET article_id = $article_id, tag_id = $tag_id";
-            self.db.query_with_params(create_query, json!({
-                "article_id": article_id,
-                "tag_id": tag_id
-            })).await?;
+            let normalized_tag_id = normalize_surreal_id(&tag_id);
+
+            // 创建关联（确保以 record 类型写入）
+            let create_query = r#"
+                CREATE article_tag SET 
+                    article_id = type::thing('article', $aid),
+                    tag_id = type::thing('tag', $tid)
+            "#;
+            self.db
+                .query_with_params(create_query, json!({
+                    "aid": normalized_article_id,
+                    "tid": normalized_tag_id
+                }))
+                .await?;
+
+            // 更新该标签的文章计数
+            let count_query = r#"
+                SELECT VALUE count() FROM article_tag 
+                WHERE string::split(string::replace(string::replace(type::string(tag_id), '⟨', ''), '⟩', ''), ':')[1] = $tid
+            "#;
+            let mut resp = self
+                .db
+                .query_with_params(count_query, json!({ "tid": normalized_tag_id }))
+                .await?;
+            let counts: Vec<i64> = resp.take(0)?;
+            let count = counts.into_iter().next().unwrap_or(0);
+
+            let update_count = r#"
+                UPDATE type::thing('tag', $tid) SET article_count = $count
+            "#;
+            self.db
+                .query_with_params(update_count, json!({
+                    "tid": normalized_tag_id,
+                    "count": count
+                }))
+                .await?;
         }
 
         // 更新文章的标签字段

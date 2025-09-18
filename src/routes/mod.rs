@@ -19,3 +19,4 @@ pub mod stripe;
 pub mod websocket;
 pub mod domain;
 pub mod publication_content;
+pub mod diagnostics;

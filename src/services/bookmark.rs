@@ -44,35 +44,68 @@ impl BookmarkService {
             ));
         }
 
-        // Check if bookmark already exists
+        // Check if bookmark already exists (compare using string form of record id)
         let query = r#"
             SELECT * FROM bookmark 
             WHERE user_id = $user_id 
-            AND article_id = $article_id
+            AND type::string(article_id) = $article_id
         "#;
-        
+
         let mut response = self.db.query_with_params(query, json!({
             "user_id": user_id,
             "article_id": &request.article_id
         })).await?;
-        
-        let existing: Vec<Bookmark> = response.take(0)?;
 
-        if !existing.is_empty() {
+        let existing_vals: Vec<serde_json::Value> = response.take(0)?;
+        if !existing_vals.is_empty() {
             return Err(AppError::Conflict(
                 "Article is already bookmarked".to_string(),
             ));
         }
 
-        let bookmark = Bookmark {
-            id: Uuid::new_v4().to_string(),
-            user_id: user_id.to_string(),
-            article_id: request.article_id,
-            note: request.note,
-            created_at: Utc::now(),
+        // Create bookmark using SQL to set article_id as a record(article)
+        let bookmark_id = Uuid::new_v4().to_string();
+        // Extract pure article uuid for record literal
+        let pure_article_id = if request.article_id.starts_with("article:") {
+            &request.article_id[8..]
+        } else {
+            &request.article_id
+        };
+        let note_clause = match &request.note {
+            Some(n) if !n.is_empty() => format!(", note = '{}'", n.replace("'", "''")),
+            _ => String::new(),
         };
 
-        let created: Bookmark = self.db.create("bookmark", bookmark).await?;
+        let query = format!(
+            "CREATE bookmark:`{}` SET user_id = '{}', article_id = article:`{}`{}, created_at = time::now()",
+            bookmark_id,
+            user_id,
+            pure_article_id,
+            note_clause
+        );
+
+        let mut response = self.db.storage.query(&query).await?;
+        let mut results: Vec<serde_json::Value> = response.take(0)?;
+        let mut created_val = results.into_iter().next().ok_or_else(|| AppError::internal("Failed to create bookmark"))?;
+
+        // Normalize id and article_id to string form for our model
+        if let Some(id_obj) = created_val.get("id").and_then(|v| v.as_object()) {
+            if let Some(id_inner) = id_obj.get("id").and_then(|v| v.as_object()) {
+                if let Some(id_str) = id_inner.get("String").and_then(|v| v.as_str()) {
+                    created_val["id"] = serde_json::json!(format!("bookmark:{}", id_str));
+                }
+            }
+        }
+        if let Some(a_obj) = created_val.get("article_id").and_then(|v| v.as_object()) {
+            if let Some(id_inner) = a_obj.get("id").and_then(|v| v.as_object()) {
+                if let Some(id_str) = id_inner.get("String").and_then(|v| v.as_str()) {
+                    created_val["article_id"] = serde_json::json!(format!("article:{}", id_str));
+                }
+            }
+        }
+
+        let created: Bookmark = serde_json::from_value(created_val)
+            .map_err(|e| AppError::internal(&format!("Failed to deserialize bookmark: {}", e)))?;
 
         // Update article bookmark count
         self.update_article_bookmark_count(&created.article_id).await?;
@@ -92,54 +125,132 @@ impl BookmarkService {
         let limit = limit.unwrap_or(20).min(100);
         let offset = (page - 1) * limit;
 
-        let query = r#"
-            SELECT 
-                b.*,
-                a.title as article_title,
-                a.slug as article_slug,
-                a.excerpt as article_excerpt,
-                a.cover_image_url as article_cover_image,
-                a.reading_time as article_reading_time,
-                u.display_name as author_name,
-                u.username as author_username
-            FROM bookmark b
-            JOIN article a ON b.article_id = a.id
-            JOIN user_profile u ON a.author_id = u.user_id
-            WHERE b.user_id = $user_id
-            AND a.is_deleted = false
-            ORDER BY b.created_at DESC
-            LIMIT $limit
-            START $offset
+        // 使用 FETCH 直接拉取 record(article) 的详情，避免 ID 字符串格式差异导致的匹配问题
+        let list_query = r#"
+            SELECT id, user_id, article_id, type::string(article_id) AS article_id_str, note, created_at
+            FROM bookmark
+            WHERE user_id = $user_id
+            ORDER BY created_at DESC
+            LIMIT $limit START $offset
+            FETCH article_id
         "#;
 
-        let mut response = self.db.query_with_params(query, json!({
+        let mut response = self.db.query_with_params(list_query, json!({
             "user_id": user_id,
             "limit": limit,
             "offset": offset
         })).await?;
-        
-        let bookmarks: Vec<Value> = response.take(0)?;
 
+        let raw_list: Vec<Value> = response.take(0)?;
         let mut result = Vec::new();
-        for bookmark_data in bookmarks {
-            if let Ok(bookmark_with_article) = serde_json::from_value::<BookmarkWithArticle>(bookmark_data) {
-                result.push(bookmark_with_article);
+
+        for mut b in raw_list {
+            // 规范化 bookmark.id
+            if let Some(id_obj) = b.get("id").and_then(|v| v.as_object()) {
+                if let Some(id_inner) = id_obj.get("id").and_then(|v| v.as_object()) {
+                    if let Some(id_str) = id_inner.get("String").and_then(|v| v.as_str()) {
+                        b["id"] = json!(format!("bookmark:{}", id_str));
+                    }
+                }
             }
+
+            // 获取已 FETCH 的文章对象，或在缺失时回退到二次查询
+            let (article, article_id) = if let Some(Value::Object(_)) = b.get("article_id") {
+                let article = b.get("article_id").unwrap();
+                let article_id = b.get("article_id_str").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                (article.clone(), article_id)
+            } else {
+                // 回退路径：article_id 不是 record，被存为字符串，使用字符串查询文章
+                let mut aid = b.get("article_id_str")
+                    .and_then(|v| v.as_str())
+                    .or_else(|| b.get("article_id").and_then(|v| v.as_str()))
+                    .unwrap_or("")
+                    .to_string();
+                // 规范化形如 article:⟨uuid⟩
+                if aid.contains('⟨') && aid.contains('⟩') {
+                    if let (Some(s), Some(e)) = (aid.find('⟨'), aid.find('⟩')) {
+                        let uuid = &aid[s + '⟨'.len_utf8()..e];
+                        aid = format!("article:{}", uuid);
+                    }
+                }
+                let mut a_resp = self.db.query_with_params(
+                    "SELECT title, slug, excerpt, cover_image_url, reading_time, author_id FROM article WHERE type::string(id) = $id",
+                    json!({ "id": aid })
+                ).await?;
+                let a_rows: Vec<Value> = a_resp.take(0)?;
+                let article = match a_rows.into_iter().next() {
+                    Some(v) => v,
+                    None => continue,
+                };
+                (article, aid)
+            };
+            // 拿到作者ID
+            let author_id = article.get("author_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+
+            // 查询作者信息
+            let mut u_resp = self.db.query_with_params(
+                "SELECT display_name, username FROM user_profile WHERE user_id = $uid",
+                json!({ "uid": author_id })
+            ).await?;
+            let u_rows: Vec<Value> = u_resp.take(0)?;
+            let user = u_rows.first().cloned().unwrap_or(json!({"display_name": "", "username": ""}));
+
+            let item = BookmarkWithArticle {
+                bookmark: serde_json::from_value::<Bookmark>(json!({
+                    "id": b.get("id").cloned().unwrap_or(json!("")),
+                    "user_id": b.get("user_id").cloned().unwrap_or(json!("")),
+                    "article_id": article_id,
+                    "note": b.get("note").cloned().unwrap_or(json!(null)),
+                    "created_at": b.get("created_at").cloned().unwrap_or(json!(Utc::now())),
+                }))
+                .map_err(|e| AppError::internal(&format!("Failed to parse bookmark: {}", e)))?,
+                article_title: article.get("title").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                article_slug: article.get("slug").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                article_excerpt: article.get("excerpt").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                article_cover_image: article.get("cover_image_url").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                article_reading_time: article.get("reading_time").and_then(|v| v.as_i64()).unwrap_or(0) as i32,
+                author_name: user.get("display_name").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                author_username: user.get("username").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            };
+
+            result.push(item);
         }
 
         Ok(result)
     }
 
     pub async fn get_bookmark(&self, bookmark_id: &str, user_id: &str) -> Result<Option<Bookmark>> {
-        let bookmark: Option<Bookmark> = self.db.get_by_id("bookmark", bookmark_id).await?;
+        let raw: Option<Value> = self.db.get_by_id("bookmark", bookmark_id).await?;
 
-        if let Some(ref b) = bookmark {
-            if b.user_id != user_id {
-                return Ok(None);
+        let mut v = match raw {
+            None => return Ok(None),
+            Some(v) => v,
+        };
+
+        // Normalize id and article_id
+        if let Some(id_obj) = v.get("id").and_then(|x| x.as_object()) {
+            if let Some(id_inner) = id_obj.get("id").and_then(|x| x.as_object()) {
+                if let Some(id_str) = id_inner.get("String").and_then(|x| x.as_str()) {
+                    v["id"] = json!(format!("bookmark:{}", id_str));
+                }
+            }
+        }
+        if let Some(a_obj) = v.get("article_id").and_then(|x| x.as_object()) {
+            if let Some(id_inner) = a_obj.get("id").and_then(|x| x.as_object()) {
+                if let Some(id_str) = id_inner.get("String").and_then(|x| x.as_str()) {
+                    v["article_id"] = json!(format!("article:{}", id_str));
+                }
             }
         }
 
-        Ok(bookmark)
+        let b: Bookmark = serde_json::from_value(v)
+            .map_err(|e| AppError::internal(&format!("Failed to deserialize bookmark: {}", e)))?;
+
+        if b.user_id != user_id {
+            return Ok(None);
+        }
+
+        Ok(Some(b))
     }
 
     pub async fn update_bookmark(
@@ -152,11 +263,30 @@ impl BookmarkService {
             .validate()
             .map_err(|e| AppError::ValidatorError(e))?;
 
-        let bookmark: Bookmark = self
+        let mut v: Value = self
             .db
             .get_by_id("bookmark", bookmark_id)
             .await?
             .ok_or_else(|| AppError::NotFound("Bookmark not found".to_string()))?;
+
+        // Normalize for deserialization
+        if let Some(id_obj) = v.get("id").and_then(|x| x.as_object()) {
+            if let Some(id_inner) = id_obj.get("id").and_then(|x| x.as_object()) {
+                if let Some(id_str) = id_inner.get("String").and_then(|x| x.as_str()) {
+                    v["id"] = json!(format!("bookmark:{}", id_str));
+                }
+            }
+        }
+        if let Some(a_obj) = v.get("article_id").and_then(|x| x.as_object()) {
+            if let Some(id_inner) = a_obj.get("id").and_then(|x| x.as_object()) {
+                if let Some(id_str) = id_inner.get("String").and_then(|x| x.as_str()) {
+                    v["article_id"] = json!(format!("article:{}", id_str));
+                }
+            }
+        }
+
+        let bookmark: Bookmark = serde_json::from_value(v)
+            .map_err(|e| AppError::internal(&format!("Failed to deserialize bookmark: {}", e)))?;
 
         if bookmark.user_id != user_id {
             return Err(AppError::forbidden(
@@ -168,17 +298,58 @@ impl BookmarkService {
             "note": request.note,
         });
 
-        let updated: Bookmark = self.db.update_by_id_with_json("bookmark", bookmark_id, updates).await?.ok_or_else(|| AppError::internal("Failed to update bookmark"))?;
+        let mut updated_val: Value = self
+            .db
+            .update_by_id_with_json("bookmark", bookmark_id, updates)
+            .await?
+            .ok_or_else(|| AppError::internal("Failed to update bookmark"))?;
+
+        // Normalize values
+        if let Some(id_obj) = updated_val.get("id").and_then(|x| x.as_object()) {
+            if let Some(id_inner) = id_obj.get("id").and_then(|x| x.as_object()) {
+                if let Some(id_str) = id_inner.get("String").and_then(|x| x.as_str()) {
+                    updated_val["id"] = json!(format!("bookmark:{}", id_str));
+                }
+            }
+        }
+        if let Some(a_obj) = updated_val.get("article_id").and_then(|x| x.as_object()) {
+            if let Some(id_inner) = a_obj.get("id").and_then(|x| x.as_object()) {
+                if let Some(id_str) = id_inner.get("String").and_then(|x| x.as_str()) {
+                    updated_val["article_id"] = json!(format!("article:{}", id_str));
+                }
+            }
+        }
+
+        let updated: Bookmark = serde_json::from_value(updated_val)
+            .map_err(|e| AppError::internal(&format!("Failed to deserialize bookmark: {}", e)))?;
 
         Ok(updated)
     }
 
     pub async fn delete_bookmark(&self, bookmark_id: &str, user_id: &str) -> Result<()> {
-        let bookmark: Bookmark = self
+        let mut v: Value = self
             .db
             .get_by_id("bookmark", bookmark_id)
             .await?
             .ok_or_else(|| AppError::NotFound("Bookmark not found".to_string()))?;
+
+        if let Some(id_obj) = v.get("id").and_then(|x| x.as_object()) {
+            if let Some(id_inner) = id_obj.get("id").and_then(|x| x.as_object()) {
+                if let Some(id_str) = id_inner.get("String").and_then(|x| x.as_str()) {
+                    v["id"] = json!(format!("bookmark:{}", id_str));
+                }
+            }
+        }
+        if let Some(a_obj) = v.get("article_id").and_then(|x| x.as_object()) {
+            if let Some(id_inner) = a_obj.get("id").and_then(|x| x.as_object()) {
+                if let Some(id_str) = id_inner.get("String").and_then(|x| x.as_str()) {
+                    v["article_id"] = json!(format!("article:{}", id_str));
+                }
+            }
+        }
+
+        let bookmark: Bookmark = serde_json::from_value(v)
+            .map_err(|e| AppError::internal(&format!("Failed to deserialize bookmark: {}", e)))?;
 
         if bookmark.user_id != user_id {
             return Err(AppError::forbidden(
@@ -204,7 +375,7 @@ impl BookmarkService {
         let query = r#"
             DELETE bookmark 
             WHERE user_id = $user_id 
-            AND article_id = $article_id
+            AND type::string(article_id) = $article_id
         "#;
 
         self.db.query_with_params(query, json!({
@@ -223,7 +394,7 @@ impl BookmarkService {
             SELECT count() as count 
             FROM bookmark 
             WHERE user_id = $user_id 
-            AND article_id = $article_id
+            AND type::string(article_id) = $article_id
         "#;
 
         let mut response = self.db.query_with_params(query, json!({
@@ -244,8 +415,8 @@ impl BookmarkService {
 
     async fn update_article_bookmark_count(&self, article_id: &str) -> Result<()> {
         let query = r#"
-            LET $count = (SELECT count() FROM bookmark WHERE article_id = $article_id);
-            UPDATE article SET bookmark_count = $count WHERE id = $article_id;
+            LET $count = (SELECT count() FROM bookmark WHERE type::string(article_id) = $article_id);
+            UPDATE article SET bookmark_count = $count WHERE type::string(id) = $article_id;
         "#;
 
         self.db.query_with_params(query, json!({

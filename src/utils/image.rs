@@ -134,7 +134,7 @@ impl ImageProcessor {
     /// 获取图片尺寸（简化版本，实际应该使用image crate）
     pub fn get_image_dimensions_internal(data: &[u8]) -> Result<ImageDimensions, String> {
         let format = Self::detect_format(data)?;
-        
+
         match format {
             ImageFormat::Png => Self::get_png_dimensions(data),
             ImageFormat::Jpeg => Self::get_jpeg_dimensions(data),
