@@ -1,18 +1,20 @@
 use axum::{
     extract::{Path, Query, State},
     response::Json,
-    routing::{get, post, put, delete},
-    Router,
+    routing::{delete, get, post, put},
+    Extension, Router,
 };
+use serde::Deserialize;
 use serde_json::{json, Value};
 use std::sync::Arc;
 
 use crate::{
     error::{AppError, Result},
     models::{
-        subscription::*,
         response::{ApiResponse, ErrorResponse},
+        subscription::*,
     },
+    services::auth::User,
     state::AppState,
 };
 
@@ -28,21 +30,24 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/:subscription_id", get(get_subscription))
         .route("/:subscription_id/cancel", post(cancel_subscription))
         .route("/user/:user_id", get(get_user_subscriptions))
-        .route("/check/:creator_id", get(check_user_subscription))
+        .route("/creator/:creator_id/status", get(get_subscription_status))
         .route("/webhook/stripe", post(handle_stripe_webhook))
+}
+
+#[derive(Debug, Deserialize)]
+struct CancelSubscriptionPayload {
+    at_period_end: Option<bool>,
 }
 
 /// 创建订阅计划
 async fn create_subscription_plan(
     State(app_state): State<Arc<AppState>>,
+    Extension(user): Extension<User>,
     Json(request): Json<CreateSubscriptionPlanRequest>,
 ) -> Result<Json<ApiResponse<SubscriptionPlan>>> {
-    // TODO: 从认证中间件获取用户ID
-    let auth_user_id = "user_123";
-    
     let plan = app_state
         .subscription_service
-        .create_subscription_plan(auth_user_id, request)
+        .create_subscription_plan(&user.id, request)
         .await?;
 
     Ok(Json(ApiResponse::success(plan)))
@@ -64,15 +69,13 @@ async fn get_subscription_plan(
 /// 更新订阅计划
 async fn update_subscription_plan(
     State(app_state): State<Arc<AppState>>,
+    Extension(user): Extension<User>,
     Path(plan_id): Path<String>,
     Json(request): Json<UpdateSubscriptionPlanRequest>,
 ) -> Result<Json<ApiResponse<SubscriptionPlan>>> {
-    // TODO: 从认证中间件获取用户ID
-    let auth_user_id = "user_123";
-    
     let plan = app_state
         .subscription_service
-        .update_subscription_plan(&plan_id, auth_user_id, request)
+        .update_subscription_plan(&plan_id, &user.id, request)
         .await?;
 
     Ok(Json(ApiResponse::success(plan)))
@@ -81,11 +84,9 @@ async fn update_subscription_plan(
 /// 停用订阅计划
 async fn deactivate_subscription_plan(
     State(app_state): State<Arc<AppState>>,
+    Extension(user): Extension<User>,
     Path(plan_id): Path<String>,
 ) -> Result<Json<ApiResponse<()>>> {
-    // TODO: 从认证中间件获取用户ID
-    let auth_user_id = "user_123";
-    
     let deactivate_request = UpdateSubscriptionPlanRequest {
         name: None,
         description: None,
@@ -93,10 +94,10 @@ async fn deactivate_subscription_plan(
         benefits: None,
         is_active: Some(false),
     };
-    
+
     app_state
         .subscription_service
-        .update_subscription_plan(&plan_id, auth_user_id, deactivate_request)
+        .update_subscription_plan(&plan_id, &user.id, deactivate_request)
         .await?;
 
     Ok(Json(ApiResponse::success(())))
@@ -119,15 +120,15 @@ async fn get_creator_plans(
 /// 获取创作者收益统计
 async fn get_creator_revenue(
     State(app_state): State<Arc<AppState>>,
+    Extension(user): Extension<User>,
     Path(creator_id): Path<String>,
 ) -> Result<Json<ApiResponse<CreatorRevenue>>> {
-    // TODO: 从认证中间件获取用户ID并验证权限
-    let auth_user_id = "user_123";
-    
-    if auth_user_id != creator_id {
-        return Err(AppError::Authorization("无权限查看该创作者收益".to_string()));
+    if user.id != creator_id {
+        return Err(AppError::Authorization(
+            "无权限查看该创作者收益".to_string(),
+        ));
     }
-    
+
     let revenue = app_state
         .subscription_service
         .get_creator_revenue(&creator_id)
@@ -139,14 +140,12 @@ async fn get_creator_revenue(
 /// 创建订阅
 async fn create_subscription(
     State(app_state): State<Arc<AppState>>,
+    Extension(user): Extension<User>,
     Json(request): Json<CreateSubscriptionRequest>,
 ) -> Result<Json<ApiResponse<SubscriptionDetails>>> {
-    // TODO: 从认证中间件获取用户ID
-    let auth_user_id = "user_123";
-    
     let subscription = app_state
         .subscription_service
-        .create_subscription(auth_user_id, request)
+        .create_subscription(&user.id, request)
         .await?;
 
     Ok(Json(ApiResponse::success(subscription)))
@@ -155,18 +154,16 @@ async fn create_subscription(
 /// 获取订阅详情
 async fn get_subscription(
     State(app_state): State<Arc<AppState>>,
+    Extension(user): Extension<User>,
     Path(subscription_id): Path<String>,
 ) -> Result<Json<ApiResponse<SubscriptionDetails>>> {
-    // TODO: 从认证中间件获取用户ID
-    let auth_user_id = "user_123";
-    
     let subscription = app_state
         .subscription_service
         .get_subscription_with_plan(&subscription_id)
         .await?;
-    
+
     // 只有订阅者本人或创作者可以查看详情
-    if subscription.subscriber_id != auth_user_id && subscription.creator.user_id != auth_user_id {
+    if subscription.subscriber_id != user.id && subscription.creator.user_id != user.id {
         return Err(AppError::Authorization("无权限查看该订阅详情".to_string()));
     }
 
@@ -176,14 +173,17 @@ async fn get_subscription(
 /// 取消订阅
 async fn cancel_subscription(
     State(app_state): State<Arc<AppState>>,
+    Extension(user): Extension<User>,
     Path(subscription_id): Path<String>,
+    Json(payload): Json<CancelSubscriptionPayload>,
 ) -> Result<Json<ApiResponse<SubscriptionDetails>>> {
-    // TODO: 从认证中间件获取用户ID
-    let auth_user_id = "user_123";
-    
     let subscription = app_state
         .subscription_service
-        .cancel_subscription(&subscription_id, auth_user_id)
+        .cancel_subscription(
+            &subscription_id,
+            &user.id,
+            payload.at_period_end.unwrap_or(true),
+        )
         .await?;
 
     Ok(Json(ApiResponse::success(subscription)))
@@ -192,17 +192,16 @@ async fn cancel_subscription(
 /// 获取用户的订阅列表
 async fn get_user_subscriptions(
     State(app_state): State<Arc<AppState>>,
+    Extension(user): Extension<User>,
     Path(user_id): Path<String>,
     Query(query): Query<SubscriptionQuery>,
 ) -> Result<Json<ApiResponse<SubscriptionListResponse>>> {
-    // TODO: 从认证中间件获取用户ID
-    let auth_user_id = "user_123";
-    
-    // 只有用户本人可以查看自己的订阅列表
-    if auth_user_id != user_id {
-        return Err(AppError::Authorization("无权限查看该用户订阅列表".to_string()));
+    if user.id != user_id {
+        return Err(AppError::Authorization(
+            "无权限查看该用户订阅列表".to_string(),
+        ));
     }
-    
+
     let subscriptions = app_state
         .subscription_service
         .get_user_subscriptions(&user_id, query)
@@ -212,19 +211,25 @@ async fn get_user_subscriptions(
 }
 
 /// 检查用户对创作者的订阅状态
-async fn check_user_subscription(
+async fn get_subscription_status(
     State(app_state): State<Arc<AppState>>,
+    Extension(user): Extension<User>,
     Path(creator_id): Path<String>,
-) -> Result<Json<ApiResponse<SubscriptionCheck>>> {
-    // TODO: 从认证中间件获取用户ID
-    let auth_user_id = "user_123";
-    
-    let check = app_state
+) -> Result<Json<ApiResponse<SubscriptionDetails>>> {
+    let status = app_state
         .subscription_service
-        .check_subscription(auth_user_id, &creator_id)
+        .check_subscription(&user.id, &creator_id)
         .await?;
 
-    Ok(Json(ApiResponse::success(check)))
+    if !status.is_subscribed {
+        return Err(AppError::NotFound("尚未订阅该创作者".to_string()));
+    }
+
+    let subscription = status
+        .subscription
+        .ok_or_else(|| AppError::NotFound("未找到订阅详情".to_string()))?;
+
+    Ok(Json(ApiResponse::success(subscription)))
 }
 
 /// 处理 Stripe Webhook
@@ -233,7 +238,7 @@ async fn handle_stripe_webhook(
     Json(event): Json<StripeWebhookEvent>,
 ) -> Result<Json<ApiResponse<()>>> {
     tracing::info!("Received Stripe webhook: {} ({})", event.r#type, event.id);
-    
+
     // 这里应该处理各种 Stripe 事件
     // 例如：subscription.updated, subscription.deleted, invoice.payment_succeeded 等
     match event.r#type.as_str() {

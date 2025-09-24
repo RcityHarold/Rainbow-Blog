@@ -1,25 +1,30 @@
 use crate::{
     error::{AppError, Result},
     models::revenue::*,
-    services::Database,
+    services::{
+        stripe::{StripePurchaseUpdate, StripeService, StripeSubscriptionRevenue},
+        Database,
+    },
 };
-use chrono::{DateTime, Utc, Duration, Datelike};
+use chrono::{DateTime, Datelike, Duration, Utc};
 use serde_json::{json, Value};
-use std::sync::Arc;
-use tracing::{debug, info, warn, error};
+use std::{collections::HashSet, sync::Arc};
+use tracing::{debug, error, info, warn};
 use validator::Validate;
 
 #[derive(Clone)]
 pub struct RevenueService {
     db: Arc<Database>,
+    stripe_service: Arc<StripeService>,
     revenue_share: RevenueShare,
     minimum_payout_amount: i64, // 最低提现金额（美分）
 }
 
 impl RevenueService {
-    pub async fn new(db: Arc<Database>) -> Result<Self> {
+    pub async fn new(db: Arc<Database>, stripe_service: Arc<StripeService>) -> Result<Self> {
         Ok(Self {
             db,
+            stripe_service,
             revenue_share: RevenueShare::default(),
             minimum_payout_amount: 5000, // $50最低提现
         })
@@ -39,14 +44,14 @@ impl RevenueService {
         // 计算实际收益
         let creator_amount = calculate_creator_revenue(gross_amount, &self.revenue_share);
         let now = Utc::now();
-        
+
         // 计算收益周期（当月）
         let period_start = chrono::TimeZone::from_utc_datetime(
             &Utc,
             &chrono::NaiveDate::from_ymd_opt(now.year(), now.month(), 1)
                 .unwrap()
                 .and_hms_opt(0, 0, 0)
-                .unwrap()
+                .unwrap(),
         );
         let period_end = period_start + Duration::days(31); // 简化处理
 
@@ -74,28 +79,37 @@ impl RevenueService {
         let platform_fee = calculate_platform_fee(gross_amount, &self.revenue_share);
         let processing_fee = calculate_processing_fee(gross_amount, &self.revenue_share);
 
-        let mut response = self.db.query_with_params(query, json!({
-            "revenue_id": revenue_id,
-            "creator_id": creator_id,
-            "source_type": source_type,
-            "source_id": source_id,
-            "gross_amount": gross_amount,
-            "amount": creator_amount,
-            "platform_fee": platform_fee,
-            "processing_fee": processing_fee,
-            "currency": currency,
-            "status": RevenueStatus::Pending,
-            "period_start": period_start,
-            "period_end": period_end,
-            "created_at": now
-        })).await?;
+        let mut response = self
+            .db
+            .query_with_params(
+                query,
+                json!({
+                    "revenue_id": revenue_id,
+                    "creator_id": creator_id,
+                    "source_type": source_type,
+                    "source_id": source_id,
+                    "gross_amount": gross_amount,
+                    "amount": creator_amount,
+                    "platform_fee": platform_fee,
+                    "processing_fee": processing_fee,
+                    "currency": currency,
+                    "status": RevenueStatus::Pending,
+                    "period_start": period_start,
+                    "period_end": period_end,
+                    "created_at": now
+                }),
+            )
+            .await?;
 
         let revenues: Vec<Value> = response.take(0)?;
-        let revenue = revenues.into_iter().next()
+        let revenue = revenues
+            .into_iter()
+            .next()
             .ok_or_else(|| AppError::Internal("Failed to create revenue record".to_string()))?;
 
         // 更新创作者收益汇总
-        self.update_creator_earnings(creator_id, creator_amount).await?;
+        self.update_creator_earnings(creator_id, creator_amount)
+            .await?;
 
         Ok(RevenueRecord {
             id: revenue["id"].as_str().unwrap().to_string(),
@@ -112,12 +126,57 @@ impl RevenueService {
         })
     }
 
-    /// 更新创作者收益汇总
-    async fn update_creator_earnings(
+    pub async fn record_purchase_revenue_from_webhook(
         &self,
-        creator_id: &str,
-        amount: i64,
-    ) -> Result<()> {
+        update: &StripePurchaseUpdate,
+    ) -> Result<Option<RevenueRecord>> {
+        let source_id = update
+            .purchase_id
+            .clone()
+            .unwrap_or_else(|| update.stripe_payment_intent_id.clone());
+
+        if self
+            .revenue_record_exists(RevenueSourceType::ArticlePurchase, &source_id)
+            .await?
+        {
+            return Ok(None);
+        }
+
+        self.record_revenue(
+            &update.creator_id,
+            RevenueSourceType::ArticlePurchase,
+            &source_id,
+            update.amount,
+            &update.currency,
+        )
+        .await
+        .map(Some)
+    }
+
+    pub async fn record_subscription_revenue_from_webhook(
+        &self,
+        revenue: &StripeSubscriptionRevenue,
+    ) -> Result<Option<RevenueRecord>> {
+        if self
+            .revenue_record_exists(RevenueSourceType::Subscription, &revenue.subscription_id)
+            .await?
+        {
+            return Ok(None);
+        }
+
+        self.record_revenue(
+            &revenue.creator_id,
+            RevenueSourceType::Subscription,
+            &revenue.subscription_id,
+            revenue.amount,
+            &revenue.currency,
+        )
+        .await
+        .map(Some)
+    }
+
+    /// 更新创作者收益汇总
+    async fn update_creator_earnings(&self, creator_id: &str, amount: i64) -> Result<()> {
         let query = r#"
             UPDATE creator_earnings 
             SET 
@@ -128,11 +187,16 @@ impl RevenueService {
             WHERE creator_id = $creator_id
         "#;
 
-        self.db.query_with_params(query, json!({
-            "creator_id": creator_id,
-            "amount": amount,
-            "now": Utc::now()
-        })).await?;
+        self.db
+            .query_with_params(
+                query,
+                json!({
+                    "creator_id": creator_id,
+                    "amount": amount,
+                    "now": Utc::now()
+                }),
+            )
+            .await?;
 
         // 如果不存在则创建
         let create_query = r#"
@@ -151,29 +215,57 @@ impl RevenueService {
             )
         "#;
 
-        self.db.query_with_params(create_query, json!({
-            "id": format!("creator_earnings:{}", creator_id),
-            "creator_id": creator_id,
-            "amount": amount,
-            "now": Utc::now()
-        })).await?;
+        self.db
+            .query_with_params(
+                create_query,
+                json!({
+                    "id": format!("creator_earnings:{}", creator_id),
+                    "creator_id": creator_id,
+                    "amount": amount,
+                    "now": Utc::now()
+                }),
+            )
+            .await?;
 
         Ok(())
     }
 
-    /// 获取创作者收益汇总
-    pub async fn get_creator_earnings(
+    async fn revenue_record_exists(
         &self,
-        creator_id: &str,
-    ) -> Result<CreatorEarnings> {
+        source_type: RevenueSourceType,
+        source_id: &str,
+    ) -> Result<bool> {
+        let mut response = self
+            .db
+            .query_with_params(
+                "SELECT id FROM revenue WHERE source_type = $source_type AND source_id = $source_id LIMIT 1",
+                json!({
+                    "source_type": source_type,
+                    "source_id": source_id,
+                }),
+            )
+            .await?;
+
+        let records: Vec<Value> = response.take(0)?;
+        Ok(!records.is_empty())
+    }
+
+    /// 获取创作者收益汇总
+    pub async fn get_creator_earnings(&self, creator_id: &str) -> Result<CreatorEarnings> {
         let query = "SELECT * FROM creator_earnings WHERE creator_id = $creator_id";
-        
-        let mut response = self.db.query_with_params(query, json!({
-            "creator_id": creator_id
-        })).await?;
+
+        let mut response = self
+            .db
+            .query_with_params(
+                query,
+                json!({
+                    "creator_id": creator_id
+                }),
+            )
+            .await?;
 
         let earnings: Vec<Value> = response.take(0)?;
-        
+
         if let Some(earning) = earnings.into_iter().next() {
             Ok(self.parse_creator_earnings(earning)?)
         } else {
@@ -199,8 +291,10 @@ impl RevenueService {
         start_date: DateTime<Utc>,
         end_date: DateTime<Utc>,
     ) -> Result<RevenueStats> {
-        debug!("Getting revenue stats for creator: {} from {} to {}", 
-            creator_id, start_date, end_date);
+        debug!(
+            "Getting revenue stats for creator: {} from {} to {}",
+            creator_id, start_date, end_date
+        );
 
         // 获取各类型收益
         let query = r#"
@@ -217,14 +311,20 @@ impl RevenueService {
             GROUP BY source_type
         "#;
 
-        let mut response = self.db.query_with_params(query, json!({
-            "creator_id": creator_id,
-            "start_date": start_date,
-            "end_date": end_date
-        })).await?;
+        let mut response = self
+            .db
+            .query_with_params(
+                query,
+                json!({
+                    "creator_id": creator_id,
+                    "start_date": start_date,
+                    "end_date": end_date
+                }),
+            )
+            .await?;
 
         let results: Vec<Value> = response.take(0)?;
-        
+
         let mut subscription_revenue = 0;
         let mut purchase_revenue = 0;
         let mut tip_revenue = 0;
@@ -235,9 +335,9 @@ impl RevenueService {
             let source_type = result["source_type"].as_str().unwrap_or("");
             let amount = result["total_amount"].as_i64().unwrap_or(0);
             let count = result["count"].as_i64().unwrap_or(0) as i32;
-            
+
             transaction_count += count;
-            
+
             match source_type {
                 "subscription" => subscription_revenue = amount,
                 "article_purchase" => purchase_revenue = amount,
@@ -248,12 +348,14 @@ impl RevenueService {
         }
 
         // 获取订阅变化
-        let (new_subscribers, cancelled_subscribers) = 
-            self.get_subscription_changes(creator_id, start_date, end_date).await?;
+        let (new_subscribers, cancelled_subscribers) = self
+            .get_subscription_changes(creator_id, start_date, end_date)
+            .await?;
 
         // 获取热门内容收益
-        let top_earning_content = 
-            self.get_top_earning_content(creator_id, start_date, end_date, 10).await?;
+        let top_earning_content = self
+            .get_top_earning_content(creator_id, start_date, end_date, 10)
+            .await?;
 
         Ok(RevenueStats {
             period,
@@ -289,14 +391,21 @@ impl RevenueService {
             GROUP ALL
         "#;
 
-        let mut new_response = self.db.query_with_params(new_query, json!({
-            "creator_id": creator_id,
-            "start_date": start_date,
-            "end_date": end_date
-        })).await?;
+        let mut new_response = self
+            .db
+            .query_with_params(
+                new_query,
+                json!({
+                    "creator_id": creator_id,
+                    "start_date": start_date,
+                    "end_date": end_date
+                }),
+            )
+            .await?;
 
         let new_results: Vec<Value> = new_response.take(0)?;
-        let new_subscribers = new_results.first()
+        let new_subscribers = new_results
+            .first()
             .and_then(|r| r["count"].as_i64())
             .unwrap_or(0) as i32;
 
@@ -312,14 +421,21 @@ impl RevenueService {
             GROUP ALL
         "#;
 
-        let mut cancelled_response = self.db.query_with_params(cancelled_query, json!({
-            "creator_id": creator_id,
-            "start_date": start_date,
-            "end_date": end_date
-        })).await?;
+        let mut cancelled_response = self
+            .db
+            .query_with_params(
+                cancelled_query,
+                json!({
+                    "creator_id": creator_id,
+                    "start_date": start_date,
+                    "end_date": end_date
+                }),
+            )
+            .await?;
 
         let cancelled_results: Vec<Value> = cancelled_response.take(0)?;
-        let cancelled_subscribers = cancelled_results.first()
+        let cancelled_subscribers = cancelled_results
+            .first()
             .and_then(|r| r["count"].as_i64())
             .unwrap_or(0) as i32;
 
@@ -372,12 +488,18 @@ impl RevenueService {
             LIMIT $limit
         "#;
 
-        let mut response = self.db.query_with_params(query, json!({
-            "creator_id": creator_id,
-            "start_date": start_date,
-            "end_date": end_date,
-            "limit": limit
-        })).await?;
+        let mut response = self
+            .db
+            .query_with_params(
+                query,
+                json!({
+                    "creator_id": creator_id,
+                    "start_date": start_date,
+                    "end_date": end_date,
+                    "limit": limit
+                }),
+            )
+            .await?;
 
         let results: Vec<Value> = response.take(0)?;
         let mut content_earnings = Vec::new();
@@ -387,7 +509,7 @@ impl RevenueService {
             let purchase_revenue = result["purchase_revenue"].as_i64().unwrap_or(0);
             let total_revenue = subscription_revenue + purchase_revenue;
             let view_count = result["view_count"].as_i64().unwrap_or(1);
-            
+
             content_earnings.push(ContentEarning {
                 content_id: result["content_id"].as_str().unwrap().to_string(),
                 content_type: result["content_type"].as_str().unwrap().to_string(),
@@ -416,30 +538,28 @@ impl RevenueService {
         debug!("Creating payout for creator: {}", creator_id);
 
         // 验证请求
-        request.validate().map_err(|e| {
-            AppError::Validation(format!("支付请求验证失败: {}", e))
-        })?;
+        request
+            .validate()
+            .map_err(|e| AppError::Validation(format!("支付请求验证失败: {}", e)))?;
 
         // 获取创作者收益
         let earnings = self.get_creator_earnings(creator_id).await?;
 
         // 检查余额
         if earnings.available_balance < request.amount {
-            return Err(AppError::BadRequest(
-                format!("可用余额不足。可用余额: ${:.2}, 请求金额: ${:.2}", 
-                    earnings.available_balance as f64 / 100.0,
-                    request.amount as f64 / 100.0
-                )
-            ));
+            return Err(AppError::BadRequest(format!(
+                "可用余额不足。可用余额: ${:.2}, 请求金额: ${:.2}",
+                earnings.available_balance as f64 / 100.0,
+                request.amount as f64 / 100.0
+            )));
         }
 
         // 检查最低提现金额
         if request.amount < self.minimum_payout_amount {
-            return Err(AppError::BadRequest(
-                format!("提现金额必须至少为 ${:.2}", 
-                    self.minimum_payout_amount as f64 / 100.0
-                )
-            ));
+            return Err(AppError::BadRequest(format!(
+                "提现金额必须至少为 ${:.2}",
+                self.minimum_payout_amount as f64 / 100.0
+            )));
         }
 
         let payout_id = format!("payout:{}", uuid::Uuid::new_v4());
@@ -462,34 +582,39 @@ impl RevenueService {
             }
         "#;
 
-        let mut response = self.db.query_with_params(query, json!({
-            "payout_id": payout_id,
-            "creator_id": creator_id,
-            "amount": request.amount,
-            "currency": earnings.currency,
-            "method": PayoutMethod::Stripe,
-            "status": PayoutStatus::Pending,
-            "bank_account_id": request.bank_account_id,
-            "description": request.description,
-            "created_at": now
-        })).await?;
+        let mut response = self
+            .db
+            .query_with_params(
+                query,
+                json!({
+                    "payout_id": payout_id,
+                    "creator_id": creator_id,
+                    "amount": request.amount,
+                    "currency": earnings.currency,
+                    "method": PayoutMethod::Stripe,
+                    "status": PayoutStatus::Pending,
+                    "bank_account_id": request.bank_account_id,
+                    "description": request.description,
+                    "created_at": now
+                }),
+            )
+            .await?;
 
         let payouts: Vec<Value> = response.take(0)?;
-        let payout = payouts.into_iter().next()
+        let payout = payouts
+            .into_iter()
+            .next()
             .ok_or_else(|| AppError::Internal("Failed to create payout".to_string()))?;
 
         // 更新创作者余额
-        self.update_balance_for_payout(creator_id, request.amount).await?;
+        self.update_balance_for_payout(creator_id, request.amount)
+            .await?;
 
         Ok(self.parse_payout(payout)?)
     }
 
     /// 更新余额（支付时）
-    async fn update_balance_for_payout(
-        &self,
-        creator_id: &str,
-        amount: i64,
-    ) -> Result<()> {
+    async fn update_balance_for_payout(&self, creator_id: &str, amount: i64) -> Result<()> {
         let query = r#"
             UPDATE creator_earnings 
             SET 
@@ -500,11 +625,17 @@ impl RevenueService {
                 available_balance >= $amount
         "#;
 
-        let mut response = self.db.query_with_params(query, json!({
-            "creator_id": creator_id,
-            "amount": amount,
-            "now": Utc::now()
-        })).await?;
+        let mut response = self
+            .db
+            .query_with_params(
+                query,
+                json!({
+                    "creator_id": creator_id,
+                    "amount": amount,
+                    "now": Utc::now()
+                }),
+            )
+            .await?;
 
         let results: Vec<Value> = response.take(0)?;
         if results.is_empty() {
@@ -534,32 +665,39 @@ impl RevenueService {
                 status = 'pending'
         "#;
 
-        let mut response = self.db.query_with_params(query, json!({
-            "payout_id": payout_id,
-            "stripe_payout_id": stripe_payout_id,
-            "now": now
-        })).await?;
+        let mut response = self
+            .db
+            .query_with_params(
+                query,
+                json!({
+                    "payout_id": payout_id,
+                    "stripe_payout_id": stripe_payout_id,
+                    "now": now
+                }),
+            )
+            .await?;
 
         let payouts: Vec<Value> = response.take(0)?;
-        let payout = payouts.into_iter().next()
+        let payout = payouts
+            .into_iter()
+            .next()
             .ok_or_else(|| AppError::NotFound("Payout not found".to_string()))?;
 
         let parsed_payout = self.parse_payout(payout)?;
 
         // 更新最后支付时间
-        self.update_last_payout_time(&parsed_payout.creator_id).await?;
+        self.update_last_payout_time(&parsed_payout.creator_id)
+            .await?;
 
         // 将待结算余额转为可用余额
-        self.process_pending_revenues(&parsed_payout.creator_id).await?;
+        self.process_pending_revenues(&parsed_payout.creator_id)
+            .await?;
 
         Ok(parsed_payout)
     }
 
     /// 更新最后支付时间
-    async fn update_last_payout_time(
-        &self,
-        creator_id: &str,
-    ) -> Result<()> {
+    async fn update_last_payout_time(&self, creator_id: &str) -> Result<()> {
         let query = r#"
             UPDATE creator_earnings 
             SET 
@@ -568,24 +706,26 @@ impl RevenueService {
             WHERE creator_id = $creator_id
         "#;
 
-        self.db.query_with_params(query, json!({
-            "creator_id": creator_id,
-            "now": Utc::now()
-        })).await?;
+        self.db
+            .query_with_params(
+                query,
+                json!({
+                    "creator_id": creator_id,
+                    "now": Utc::now()
+                }),
+            )
+            .await?;
 
         Ok(())
     }
 
     /// 处理待结算收益
-    async fn process_pending_revenues(
-        &self,
-        creator_id: &str,
-    ) -> Result<()> {
+    async fn process_pending_revenues(&self, creator_id: &str) -> Result<()> {
         let now = Utc::now();
-        
+
         // 将30天前的待结算收益转为可用余额
         let cutoff_date = now - Duration::days(30);
-        
+
         let query = r#"
             UPDATE revenue 
             SET 
@@ -597,16 +737,23 @@ impl RevenueService {
                 created_at <= $cutoff_date
         "#;
 
-        let mut response = self.db.query_with_params(query, json!({
-            "creator_id": creator_id,
-            "now": now,
-            "cutoff_date": cutoff_date
-        })).await?;
+        let mut response = self
+            .db
+            .query_with_params(
+                query,
+                json!({
+                    "creator_id": creator_id,
+                    "now": now,
+                    "cutoff_date": cutoff_date
+                }),
+            )
+            .await?;
 
         let revenues: Vec<Value> = response.take(0)?;
-        
+
         // 计算总金额
-        let total_amount: i64 = revenues.iter()
+        let total_amount: i64 = revenues
+            .iter()
             .map(|r| r["amount"].as_i64().unwrap_or(0))
             .sum();
 
@@ -621,21 +768,23 @@ impl RevenueService {
                 WHERE creator_id = $creator_id
             "#;
 
-            self.db.query_with_params(update_query, json!({
-                "creator_id": creator_id,
-                "amount": total_amount,
-                "now": now
-            })).await?;
+            self.db
+                .query_with_params(
+                    update_query,
+                    json!({
+                        "creator_id": creator_id,
+                        "amount": total_amount,
+                        "now": now
+                    }),
+                )
+                .await?;
         }
 
         Ok(())
     }
 
     /// 获取收益仪表板
-    pub async fn get_revenue_dashboard(
-        &self,
-        creator_id: &str,
-    ) -> Result<RevenueDashboard> {
+    pub async fn get_revenue_dashboard(&self, creator_id: &str) -> Result<RevenueDashboard> {
         // 获取收益汇总
         let earnings = self.get_creator_earnings(creator_id).await?;
 
@@ -646,7 +795,7 @@ impl RevenueService {
             &chrono::NaiveDate::from_ymd_opt(now.year(), now.month(), 1)
                 .unwrap()
                 .and_hms_opt(0, 0, 0)
-                .unwrap()
+                .unwrap(),
         );
         let next_month_start = if now.month() == 12 {
             chrono::TimeZone::from_utc_datetime(
@@ -654,7 +803,7 @@ impl RevenueService {
                 &chrono::NaiveDate::from_ymd_opt(now.year() + 1, 1, 1)
                     .unwrap()
                     .and_hms_opt(0, 0, 0)
-                    .unwrap()
+                    .unwrap(),
             )
         } else {
             chrono::TimeZone::from_utc_datetime(
@@ -662,16 +811,18 @@ impl RevenueService {
                 &chrono::NaiveDate::from_ymd_opt(now.year(), now.month() + 1, 1)
                     .unwrap()
                     .and_hms_opt(0, 0, 0)
-                    .unwrap()
+                    .unwrap(),
             )
         };
 
-        let current_month_stats = self.get_revenue_stats(
-            creator_id,
-            RevenuePeriod::Monthly,
-            current_month_start,
-            next_month_start,
-        ).await?;
+        let current_month_stats = self
+            .get_revenue_stats(
+                creator_id,
+                RevenuePeriod::Monthly,
+                current_month_start,
+                next_month_start,
+            )
+            .await?;
 
         // 获取上月统计
         let last_month_end = current_month_start;
@@ -681,24 +832,30 @@ impl RevenueService {
                 &chrono::NaiveDate::from_ymd_opt(current_month_start.year() - 1, 12, 1)
                     .unwrap()
                     .and_hms_opt(0, 0, 0)
-                    .unwrap()
+                    .unwrap(),
             )
         } else {
             chrono::TimeZone::from_utc_datetime(
                 &Utc,
-                &chrono::NaiveDate::from_ymd_opt(current_month_start.year(), current_month_start.month() - 1, 1)
-                    .unwrap()
-                    .and_hms_opt(0, 0, 0)
-                    .unwrap()
+                &chrono::NaiveDate::from_ymd_opt(
+                    current_month_start.year(),
+                    current_month_start.month() - 1,
+                    1,
+                )
+                .unwrap()
+                .and_hms_opt(0, 0, 0)
+                .unwrap(),
             )
         };
 
-        let last_month_stats = self.get_revenue_stats(
-            creator_id,
-            RevenuePeriod::Monthly,
-            last_month_start,
-            last_month_end,
-        ).await?;
+        let last_month_stats = self
+            .get_revenue_stats(
+                creator_id,
+                RevenuePeriod::Monthly,
+                last_month_start,
+                last_month_end,
+            )
+            .await?;
 
         // 获取最近交易
         let recent_transactions = self.get_recent_transactions(creator_id, 10).await?;
@@ -716,6 +873,8 @@ impl RevenueService {
             Some(current_month_start)
         };
 
+        let connect_status = self.build_connect_status(creator_id).await?;
+
         Ok(RevenueDashboard {
             earnings,
             current_month_stats,
@@ -725,7 +884,63 @@ impl RevenueService {
             bank_accounts,
             minimum_payout_amount: self.minimum_payout_amount,
             next_payout_date,
+            connect_status,
         })
+    }
+
+    async fn build_connect_status(&self, creator_id: &str) -> Result<ConnectStatus> {
+        let Some(connect) = self
+            .stripe_service
+            .get_connect_account_for_user(creator_id)
+            .await?
+        else {
+            return Ok(ConnectStatus {
+                has_connect_account: false,
+                charges_enabled: false,
+                payouts_enabled: false,
+                details_submitted: false,
+                requirements_due: Vec::new(),
+            });
+        };
+
+        let mut requirements = Self::collect_requirements(&connect.account.requirements);
+        if connect.requires_onboarding && !requirements.iter().any(|r| r == "complete_onboarding") {
+            requirements.push("complete_onboarding".to_string());
+        }
+
+        Ok(ConnectStatus {
+            has_connect_account: true,
+            charges_enabled: connect.account.charges_enabled,
+            payouts_enabled: connect.account.payouts_enabled,
+            details_submitted: connect.account.details_submitted,
+            requirements_due: requirements,
+        })
+    }
+
+    fn collect_requirements(requirements: &Value) -> Vec<String> {
+        let mut items = HashSet::new();
+        for key in ["currently_due", "past_due", "eventually_due"] {
+            if let Some(arr) = requirements.get(key).and_then(|v| v.as_array()) {
+                for entry in arr {
+                    if let Some(val) = entry.as_str() {
+                        items.insert(val.to_string());
+                    }
+                }
+            }
+        }
+
+        if let Some(pending) = requirements
+            .get("pending_verification")
+            .and_then(|v| v.as_array())
+        {
+            for entry in pending {
+                if let Some(val) = entry.as_str() {
+                    items.insert(val.to_string());
+                }
+            }
+        }
+
+        items.into_iter().collect()
     }
 
     /// 获取最近交易记录
@@ -741,22 +956,26 @@ impl RevenueService {
             LIMIT $limit
         "#;
 
-        let mut response = self.db.query_with_params(query, json!({
-            "creator_id": creator_id,
-            "limit": limit
-        })).await?;
+        let mut response = self
+            .db
+            .query_with_params(
+                query,
+                json!({
+                    "creator_id": creator_id,
+                    "limit": limit
+                }),
+            )
+            .await?;
 
         let revenues: Vec<Value> = response.take(0)?;
-        revenues.into_iter()
+        revenues
+            .into_iter()
             .map(|r| self.parse_revenue_record(r))
             .collect()
     }
 
     /// 获取待处理支付
-    async fn get_pending_payouts(
-        &self,
-        creator_id: &str,
-    ) -> Result<Vec<Payout>> {
+    async fn get_pending_payouts(&self, creator_id: &str) -> Result<Vec<Payout>> {
         let query = r#"
             SELECT * FROM payout
             WHERE 
@@ -765,21 +984,22 @@ impl RevenueService {
             ORDER BY created_at DESC
         "#;
 
-        let mut response = self.db.query_with_params(query, json!({
-            "creator_id": creator_id
-        })).await?;
+        let mut response = self
+            .db
+            .query_with_params(
+                query,
+                json!({
+                    "creator_id": creator_id
+                }),
+            )
+            .await?;
 
         let payouts: Vec<Value> = response.take(0)?;
-        payouts.into_iter()
-            .map(|p| self.parse_payout(p))
-            .collect()
+        payouts.into_iter().map(|p| self.parse_payout(p)).collect()
     }
 
     /// 获取银行账户列表
-    pub async fn get_bank_accounts(
-        &self,
-        creator_id: &str,
-    ) -> Result<Vec<BankAccount>> {
+    pub async fn get_bank_accounts(&self, creator_id: &str) -> Result<Vec<BankAccount>> {
         let query = r#"
             SELECT * FROM bank_account
             WHERE 
@@ -788,12 +1008,19 @@ impl RevenueService {
             ORDER BY is_default DESC, created_at DESC
         "#;
 
-        let mut response = self.db.query_with_params(query, json!({
-            "creator_id": creator_id
-        })).await?;
+        let mut response = self
+            .db
+            .query_with_params(
+                query,
+                json!({
+                    "creator_id": creator_id
+                }),
+            )
+            .await?;
 
         let accounts: Vec<Value> = response.take(0)?;
-        accounts.into_iter()
+        accounts
+            .into_iter()
             .map(|a| self.parse_bank_account(a))
             .collect()
     }
@@ -809,12 +1036,16 @@ impl RevenueService {
             currency: value["currency"].as_str().unwrap().to_string(),
             status: serde_json::from_value(value["status"].clone())?,
             period_start: DateTime::parse_from_rfc3339(value["period_start"].as_str().unwrap())
-                .unwrap().with_timezone(&Utc),
+                .unwrap()
+                .with_timezone(&Utc),
             period_end: DateTime::parse_from_rfc3339(value["period_end"].as_str().unwrap())
-                .unwrap().with_timezone(&Utc),
+                .unwrap()
+                .with_timezone(&Utc),
             created_at: DateTime::parse_from_rfc3339(value["created_at"].as_str().unwrap())
-                .unwrap().with_timezone(&Utc),
-            processed_at: value["processed_at"].as_str()
+                .unwrap()
+                .with_timezone(&Utc),
+            processed_at: value["processed_at"]
+                .as_str()
                 .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
                 .map(|dt| dt.with_timezone(&Utc)),
         })
@@ -829,11 +1060,13 @@ impl RevenueService {
             pending_balance: value["pending_balance"].as_i64().unwrap_or(0),
             lifetime_earnings: value["lifetime_earnings"].as_i64().unwrap_or(0),
             currency: value["currency"].as_str().unwrap_or("USD").to_string(),
-            last_payout_at: value["last_payout_at"].as_str()
+            last_payout_at: value["last_payout_at"]
+                .as_str()
                 .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
                 .map(|dt| dt.with_timezone(&Utc)),
             updated_at: DateTime::parse_from_rfc3339(value["updated_at"].as_str().unwrap())
-                .unwrap().with_timezone(&Utc),
+                .unwrap()
+                .with_timezone(&Utc),
         })
     }
 
@@ -850,11 +1083,14 @@ impl RevenueService {
             bank_account_id: value["bank_account_id"].as_str().map(String::from),
             description: value["description"].as_str().map(String::from),
             created_at: DateTime::parse_from_rfc3339(value["created_at"].as_str().unwrap())
-                .unwrap().with_timezone(&Utc),
-            processed_at: value["processed_at"].as_str()
+                .unwrap()
+                .with_timezone(&Utc),
+            processed_at: value["processed_at"]
+                .as_str()
                 .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
                 .map(|dt| dt.with_timezone(&Utc)),
-            failed_at: value["failed_at"].as_str()
+            failed_at: value["failed_at"]
+                .as_str()
                 .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
                 .map(|dt| dt.with_timezone(&Utc)),
             failure_reason: value["failure_reason"].as_str().map(String::from),
@@ -875,8 +1111,10 @@ impl RevenueService {
             is_verified: value["is_verified"].as_bool().unwrap_or(false),
             stripe_bank_account_id: value["stripe_bank_account_id"].as_str().map(String::from),
             created_at: DateTime::parse_from_rfc3339(value["created_at"].as_str().unwrap())
-                .unwrap().with_timezone(&Utc),
-            verified_at: value["verified_at"].as_str()
+                .unwrap()
+                .with_timezone(&Utc),
+            verified_at: value["verified_at"]
+                .as_str()
                 .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
                 .map(|dt| dt.with_timezone(&Utc)),
         })
@@ -914,32 +1152,48 @@ impl RevenueService {
         }
 
         let where_clause = where_conditions.join(" AND ");
-        
+
         // 获取数据
-        let query_str = format!(r#"
+        let query_str = format!(
+            r#"
             SELECT * FROM revenue
             WHERE {}
             ORDER BY created_at DESC
             START {}
             LIMIT {}
-        "#, where_clause, offset, limit);
+        "#,
+            where_clause, offset, limit
+        );
 
-        let mut response = self.db.query_with_params(&query_str, query_params.clone()).await?;
+        let mut response = self
+            .db
+            .query_with_params(&query_str, query_params.clone())
+            .await?;
         let transactions: Vec<Value> = response.take(0)?;
 
         // 获取总数
-        let count_query = format!(r#"
+        let count_query = format!(
+            r#"
             SELECT count() as total FROM revenue
             WHERE {}
             GROUP ALL
-        "#, where_clause);
+        "#,
+            where_clause
+        );
 
-        let mut count_response = self.db.query_with_params(&count_query, json!({
-            "creator_id": creator_id
-        })).await?;
+        let mut count_response = self
+            .db
+            .query_with_params(
+                &count_query,
+                json!({
+                    "creator_id": creator_id
+                }),
+            )
+            .await?;
 
         let count_results: Vec<Value> = count_response.take(0)?;
-        let total = count_results.first()
+        let total = count_results
+            .first()
             .and_then(|r| r["total"].as_i64())
             .unwrap_or(0);
 
@@ -955,25 +1209,41 @@ impl RevenueService {
             LIMIT 50
         "#;
 
-        let mut response = self.db.query_with_params(query, json!({
-            "creator_id": creator_id
-        })).await?;
+        let mut response = self
+            .db
+            .query_with_params(
+                query,
+                json!({
+                    "creator_id": creator_id
+                }),
+            )
+            .await?;
 
         let payouts: Vec<Value> = response.take(0)?;
         Ok(payouts)
     }
 
     /// 查询支付详情
-    pub async fn query_payout_details(&self, payout_id: &str, creator_id: &str) -> Result<Option<Value>> {
+    pub async fn query_payout_details(
+        &self,
+        payout_id: &str,
+        creator_id: &str,
+    ) -> Result<Option<Value>> {
         let query = r#"
             SELECT * FROM payout
             WHERE id = $payout_id AND creator_id = $creator_id
         "#;
 
-        let mut response = self.db.query_with_params(query, json!({
-            "payout_id": payout_id,
-            "creator_id": creator_id
-        })).await?;
+        let mut response = self
+            .db
+            .query_with_params(
+                query,
+                json!({
+                    "payout_id": payout_id,
+                    "creator_id": creator_id
+                }),
+            )
+            .await?;
 
         let payouts: Vec<Value> = response.take(0)?;
         Ok(payouts.into_iter().next())
@@ -1008,18 +1278,26 @@ impl RevenueService {
             }
         "#;
 
-        let mut response = self.db.query_with_params(query, json!({
-            "account_id": account_id,
-            "creator_id": creator_id,
-            "account_holder_name": account_holder_name,
-            "bank_name": bank_name,
-            "country": country,
-            "currency": currency,
-            "created_at": now
-        })).await?;
+        let mut response = self
+            .db
+            .query_with_params(
+                query,
+                json!({
+                    "account_id": account_id,
+                    "creator_id": creator_id,
+                    "account_holder_name": account_holder_name,
+                    "bank_name": bank_name,
+                    "country": country,
+                    "currency": currency,
+                    "created_at": now
+                }),
+            )
+            .await?;
 
         let accounts: Vec<Value> = response.take(0)?;
-        accounts.into_iter().next()
+        accounts
+            .into_iter()
+            .next()
             .ok_or_else(|| AppError::Internal("Failed to create bank account".to_string()))
     }
 
@@ -1036,18 +1314,28 @@ impl RevenueService {
                 creator_id = $creator_id
         "#;
 
-        let mut response = self.db.query_with_params(query, json!({
-            "account_id": account_id,
-            "creator_id": creator_id,
-            "now": now
-        })).await?;
+        let mut response = self
+            .db
+            .query_with_params(
+                query,
+                json!({
+                    "account_id": account_id,
+                    "creator_id": creator_id,
+                    "now": now
+                }),
+            )
+            .await?;
 
         let accounts: Vec<Value> = response.take(0)?;
         Ok(!accounts.is_empty())
     }
 
     /// 设置默认银行账户
-    pub async fn set_default_bank_account(&self, account_id: &str, creator_id: &str) -> Result<bool> {
+    pub async fn set_default_bank_account(
+        &self,
+        account_id: &str,
+        creator_id: &str,
+    ) -> Result<bool> {
         // 先取消其他默认账户
         let clear_query = r#"
             UPDATE bank_account 
@@ -1055,9 +1343,14 @@ impl RevenueService {
             WHERE creator_id = $creator_id
         "#;
 
-        self.db.query_with_params(clear_query, json!({
-            "creator_id": creator_id
-        })).await?;
+        self.db
+            .query_with_params(
+                clear_query,
+                json!({
+                    "creator_id": creator_id
+                }),
+            )
+            .await?;
 
         // 设置新的默认账户
         let set_query = r#"
@@ -1069,10 +1362,16 @@ impl RevenueService {
                 is_verified = true
         "#;
 
-        let mut response = self.db.query_with_params(set_query, json!({
-            "account_id": account_id,
-            "creator_id": creator_id
-        })).await?;
+        let mut response = self
+            .db
+            .query_with_params(
+                set_query,
+                json!({
+                    "account_id": account_id,
+                    "creator_id": creator_id
+                }),
+            )
+            .await?;
 
         let accounts: Vec<Value> = response.take(0)?;
         Ok(!accounts.is_empty())

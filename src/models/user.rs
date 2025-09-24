@@ -1,8 +1,8 @@
-use serde::{Deserialize, Serialize};
 use chrono::{DateTime, Utc};
-use validator::Validate;
-use uuid::Uuid;
+use serde::{Deserialize, Serialize};
 use surrealdb::sql::Thing;
+use uuid::Uuid;
+use validator::Validate;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UserProfile {
@@ -32,6 +32,10 @@ pub struct UserProfile {
     pub linkedin_url: Option<String>,
     #[serde(default)]
     pub facebook_url: Option<String>,
+    #[serde(default)]
+    pub stripe_customer_id: Option<String>,
+    #[serde(default)]
+    pub stripe_account_id: Option<String>,
     pub follower_count: i64,
     pub following_count: i64,
     pub article_count: i64,
@@ -46,28 +50,28 @@ pub struct UserProfile {
 pub struct CreateUserProfileRequest {
     #[validate(length(min = 3, max = 30))]
     pub username: String,
-    
+
     #[validate(length(min = 1, max = 50))]
     pub display_name: String,
-    
+
     #[validate(length(max = 160))]
     pub bio: Option<String>,
-    
+
     #[validate(url)]
     pub website: Option<String>,
-    
+
     #[validate(length(max = 100))]
     pub location: Option<String>,
-    
+
     #[validate(length(max = 15))]
     pub twitter_username: Option<String>,
-    
+
     #[validate(length(max = 39))]
     pub github_username: Option<String>,
-    
+
     #[validate(url)]
     pub linkedin_url: Option<String>,
-    
+
     #[validate(url)]
     pub facebook_url: Option<String>,
 }
@@ -76,31 +80,31 @@ pub struct CreateUserProfileRequest {
 pub struct UpdateUserProfileRequest {
     #[validate(length(min = 1, max = 50))]
     pub display_name: Option<String>,
-    
+
     #[validate(length(max = 160))]
     pub bio: Option<String>,
-    
+
     #[validate(url)]
     pub avatar_url: Option<String>,
-    
+
     #[validate(url)]
     pub cover_image_url: Option<String>,
-    
+
     #[validate(url)]
     pub website: Option<String>,
-    
+
     #[validate(length(max = 100))]
     pub location: Option<String>,
-    
+
     #[validate(length(max = 15))]
     pub twitter_username: Option<String>,
-    
+
     #[validate(length(max = 39))]
     pub github_username: Option<String>,
-    
+
     #[validate(url)]
     pub linkedin_url: Option<String>,
-    
+
     #[validate(url)]
     pub facebook_url: Option<String>,
 }
@@ -118,7 +122,7 @@ pub struct UserProfileResponse {
     pub user_id: String,
     pub username: String,
     pub display_name: String,
-    pub email: String, // 包含邮箱信息
+    pub email: String,        // 包含邮箱信息
     pub email_verified: bool, // 包含邮箱验证状态
     pub bio: Option<String>,
     pub avatar_url: Option<String>,
@@ -129,6 +133,10 @@ pub struct UserProfileResponse {
     pub github_username: Option<String>,
     pub linkedin_url: Option<String>,
     pub facebook_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stripe_customer_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stripe_account_id: Option<String>,
     pub follower_count: i64,
     pub following_count: i64,
     pub article_count: i64,
@@ -178,6 +186,8 @@ impl UserProfile {
             github_username: None,
             linkedin_url: None,
             facebook_url: None,
+            stripe_customer_id: None,
+            stripe_account_id: None,
             follower_count: 0,
             following_count: 0,
             article_count: 0,
@@ -206,6 +216,8 @@ impl UserProfile {
             github_username: self.github_username.clone(),
             linkedin_url: self.linkedin_url.clone(),
             facebook_url: self.facebook_url.clone(),
+            stripe_customer_id: self.stripe_customer_id.clone(),
+            stripe_account_id: self.stripe_account_id.clone(),
             follower_count: self.follower_count,
             following_count: self.following_count,
             article_count: self.article_count,
@@ -228,7 +240,7 @@ impl From<CreateUserProfileRequest> for UserProfile {
             user_id: String::new(), // 将在服务层设置
             username: req.username,
             display_name: req.display_name,
-            email: None, // 将在服务层设置
+            email: None,          // 将在服务层设置
             email_verified: None, // 默认未验证
             bio: req.bio,
             avatar_url: None,
@@ -239,6 +251,8 @@ impl From<CreateUserProfileRequest> for UserProfile {
             github_username: req.github_username,
             linkedin_url: req.linkedin_url,
             facebook_url: req.facebook_url,
+            stripe_customer_id: None,
+            stripe_account_id: None,
             follower_count: 0,
             following_count: 0,
             article_count: 0,

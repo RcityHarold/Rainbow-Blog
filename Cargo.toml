@@ -77,6 +77,8 @@ base64 = "0.21"
 
 # 哈希
 sha2 = "0.10"
+hmac = "0.12"
+hex = "0.4"
 
 # Markdown处理
 pulldown-cmark = { version = "0.9", features = ["simd"] }
@@ -161,4 +163,3 @@ opt-level = 0
 
 [profile.dev.package."*"]
 opt-level = 3
-

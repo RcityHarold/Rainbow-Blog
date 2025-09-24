@@ -118,10 +118,17 @@ async fn main() -> anyhow::Result<()> {
     let tag_service = crate::services::tag::TagService::new(db.clone()).await?;
     let series_service = SeriesService::new(db.clone()).await?;
     let analytics_service = AnalyticsService::new(db.clone()).await?;
-    let subscription_service = SubscriptionService::new(db.clone(), &config).await?;
-    let payment_service = PaymentService::new(db.clone(), Arc::new(subscription_service.clone())).await?;
-    let revenue_service = RevenueService::new(db.clone()).await?;
     let stripe_service = StripeService::new(db.clone(), StripeConfig::default()).await?;
+    let stripe_service_arc = Arc::new(stripe_service.clone());
+    let subscription_service = SubscriptionService::new(db.clone(), stripe_service_arc.clone()).await?;
+    let subscription_service_arc = Arc::new(subscription_service.clone());
+    let payment_service = PaymentService::new(
+        db.clone(),
+        subscription_service_arc.clone(),
+        stripe_service_arc.clone(),
+    )
+    .await?;
+    let revenue_service = RevenueService::new(db.clone(), stripe_service_arc.clone()).await?;
     let websocket_service = WebSocketService::new(db.clone()).await?;
     let realtime_service = RealtimeService::new(Arc::new(websocket_service.clone()), Arc::new(notification_service.clone()));
     

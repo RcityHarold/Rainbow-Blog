@@ -1,5 +1,5 @@
-use serde::{Deserialize, Serialize};
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 use validator::Validate;
 
 /// 订阅计划
@@ -11,6 +11,8 @@ pub struct SubscriptionPlan {
     pub description: Option<String>,
     pub price: i64, // 价格（美分）
     pub currency: String,
+    pub stripe_product_id: Option<String>,
+    pub stripe_price_id: Option<String>,
     pub benefits: Vec<String>,
     pub is_active: bool,
     pub created_at: DateTime<Utc>,
@@ -22,16 +24,16 @@ pub struct SubscriptionPlan {
 pub struct CreateSubscriptionPlanRequest {
     #[validate(length(min = 1, max = 100, message = "计划名称长度必须在1-100字符之间"))]
     pub name: String,
-    
+
     #[validate(length(max = 500, message = "描述不能超过500字符"))]
     pub description: Option<String>,
-    
+
     #[validate(range(min = 0, message = "价格不能为负数"))]
     pub price: i64, // 月费（美分）
-    
+
     #[validate(length(min = 3, max = 3, message = "货币代码必须是3位字符"))]
     pub currency: Option<String>, // 默认USD
-    
+
     pub benefits: Vec<String>,
 }
 
@@ -40,13 +42,13 @@ pub struct CreateSubscriptionPlanRequest {
 pub struct UpdateSubscriptionPlanRequest {
     #[validate(length(min = 1, max = 100, message = "计划名称长度必须在1-100字符之间"))]
     pub name: Option<String>,
-    
+
     #[validate(length(max = 500, message = "描述不能超过500字符"))]
     pub description: Option<String>,
-    
+
     #[validate(range(min = 0, message = "价格不能为负数"))]
     pub price: Option<i64>,
-    
+
     pub benefits: Option<Vec<String>>,
     pub is_active: Option<bool>,
 }
@@ -63,6 +65,7 @@ pub struct Subscription {
     pub current_period_end: DateTime<Utc>,
     pub canceled_at: Option<DateTime<Utc>>,
     pub stripe_subscription_id: Option<String>,
+    pub stripe_subscription_record_id: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -106,6 +109,8 @@ pub struct SubscriptionDetails {
     pub started_at: DateTime<Utc>,
     pub current_period_end: DateTime<Utc>,
     pub canceled_at: Option<DateTime<Utc>>,
+    pub stripe_subscription_id: Option<String>,
+    pub stripe_subscription_record_id: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -126,9 +131,9 @@ pub struct SubscriptionStats {
     pub total_subscribers: i64,
     pub active_subscribers: i64,
     pub monthly_revenue: i64, // 美分
-    pub total_revenue: i64, // 美分
-    pub churn_rate: f64, // 流失率
-    pub growth_rate: f64, // 增长率
+    pub total_revenue: i64,   // 美分
+    pub churn_rate: f64,      // 流失率
+    pub growth_rate: f64,     // 增长率
 }
 
 /// 订阅查询参数

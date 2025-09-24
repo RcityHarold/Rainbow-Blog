@@ -1,5 +1,6 @@
-use serde::{Deserialize, Serialize};
+use crate::models::stripe::StripeIntentResponse;
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 use validator::Validate;
 
 /// 付费内容访问控制
@@ -18,11 +19,11 @@ pub struct ContentAccess {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum AccessType {
-    Free,           // 免费内容
-    Subscription,   // 订阅访问
-    OneTime,        // 单次购买
-    Author,         // 作者本人
-    Preview,        // 预览访问（部分内容）
+    Free,         // 免费内容
+    Subscription, // 订阅访问
+    OneTime,      // 单次购买
+    Author,       // 作者本人
+    Preview,      // 预览访问（部分内容）
 }
 
 /// 付费内容预览
@@ -48,12 +49,12 @@ pub struct ContentAccessRequest {
 pub struct ArticlePricingRequest {
     #[validate(range(min = 0, message = "价格不能为负数"))]
     pub price: Option<i64>, // 单次购买价格（美分），None表示仅订阅
-    
+
     pub subscription_required: bool, // 是否需要订阅
-    
+
     #[validate(range(min = 0, max = 100, message = "预览比例必须在0-100之间"))]
     pub preview_percentage: Option<u8>, // 预览内容比例（0-100）
-    
+
     #[validate(length(max = 200, message = "付费墙信息不能超过200字符"))]
     pub paywall_message: Option<String>, // 自定义付费墙信息
 }
@@ -91,10 +92,10 @@ pub struct ArticlePurchase {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum PurchaseStatus {
-    Pending,    // 待支付
-    Completed,  // 已完成
-    Failed,     // 支付失败
-    Refunded,   // 已退款
+    Pending,   // 待支付
+    Completed, // 已完成
+    Failed,    // 支付失败
+    Refunded,  // 已退款
 }
 
 /// 单次购买请求
@@ -102,6 +103,13 @@ pub enum PurchaseStatus {
 pub struct ArticlePurchaseRequest {
     pub article_id: String,
     pub payment_method_id: Option<String>, // Stripe payment method ID
+}
+
+/// 单次购买响应
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ArticlePurchaseResponse {
+    pub purchase: ArticlePurchase,
+    pub payment: StripeIntentResponse,
 }
 
 /// 内容访问统计
@@ -125,7 +133,7 @@ pub struct UserContentAccess {
     pub access_type: AccessType,
     pub accessed_at: DateTime<Utc>,
     pub reading_time: Option<i64>, // 阅读时间（秒）
-    pub completed: bool, // 是否完整阅读
+    pub completed: bool,           // 是否完整阅读
 }
 
 /// 付费内容仪表板

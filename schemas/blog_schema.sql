@@ -21,6 +21,8 @@ DEFINE FIELD twitter_username ON user_profile TYPE option<string>;
 DEFINE FIELD github_username ON user_profile TYPE option<string>;
 DEFINE FIELD linkedin_url ON user_profile TYPE option<string>;
 DEFINE FIELD facebook_url ON user_profile TYPE option<string>;
+DEFINE FIELD stripe_customer_id ON user_profile TYPE option<string>;
+DEFINE FIELD stripe_account_id ON user_profile TYPE option<string>;
 DEFINE FIELD follower_count ON user_profile TYPE number DEFAULT 0;
 DEFINE FIELD following_count ON user_profile TYPE number DEFAULT 0;
 DEFINE FIELD article_count ON user_profile TYPE number DEFAULT 0;
@@ -34,6 +36,8 @@ DEFINE FIELD updated_at ON user_profile TYPE datetime DEFAULT time::now();
 DEFINE INDEX user_profile_user_id_idx ON user_profile COLUMNS user_id UNIQUE;
 DEFINE INDEX user_profile_username_idx ON user_profile COLUMNS username UNIQUE;
 DEFINE INDEX user_profile_verified_idx ON user_profile COLUMNS is_verified;
+DEFINE INDEX user_profile_stripe_customer_idx ON user_profile COLUMNS stripe_customer_id UNIQUE;
+DEFINE INDEX user_profile_stripe_account_idx ON user_profile COLUMNS stripe_account_id UNIQUE;
 
 -- =====================================
 -- 核心内容表
@@ -338,6 +342,7 @@ DEFINE FIELD name ON subscription_plan TYPE string ASSERT $value != NONE;
 DEFINE FIELD description ON subscription_plan TYPE option<string>;
 DEFINE FIELD price ON subscription_plan TYPE number ASSERT $value >= 0; -- 月费（美分）
 DEFINE FIELD currency ON subscription_plan TYPE string DEFAULT "USD";
+DEFINE FIELD stripe_price_id ON subscription_plan TYPE option<string>;
 DEFINE FIELD benefits ON subscription_plan TYPE array<string> DEFAULT [];
 DEFINE FIELD is_active ON subscription_plan TYPE bool DEFAULT true;
 DEFINE FIELD created_at ON subscription_plan TYPE datetime DEFAULT time::now();
@@ -358,6 +363,7 @@ DEFINE FIELD started_at ON subscription TYPE datetime DEFAULT time::now();
 DEFINE FIELD current_period_end ON subscription TYPE datetime DEFAULT time::now();
 DEFINE FIELD canceled_at ON subscription TYPE option<datetime>;
 DEFINE FIELD stripe_subscription_id ON subscription TYPE option<string>; -- 支付平台ID
+DEFINE FIELD stripe_subscription_record_id ON subscription TYPE option<string>; -- 内部 Stripe 订阅记录ID
 DEFINE FIELD created_at ON subscription TYPE datetime DEFAULT time::now();
 DEFINE FIELD updated_at ON subscription TYPE datetime DEFAULT time::now();
 
@@ -366,6 +372,7 @@ DEFINE INDEX subscription_subscriber_idx ON subscription COLUMNS subscriber_id;
 DEFINE INDEX subscription_creator_idx ON subscription COLUMNS creator_id;
 DEFINE INDEX subscription_status_idx ON subscription COLUMNS status;
 DEFINE INDEX subscription_stripe_idx ON subscription COLUMNS stripe_subscription_id;
+DEFINE INDEX subscription_stripe_record_idx ON subscription COLUMNS stripe_subscription_record_id;
 
 -- =====================================
 -- 第四阶段：会员和付费系统扩展
@@ -476,7 +483,8 @@ DEFINE FIELD stripe_payment_intent_id ON payment_intent TYPE string ASSERT $valu
 DEFINE FIELD user_id ON payment_intent TYPE string ASSERT $value != NONE;
 DEFINE FIELD amount ON payment_intent TYPE number ASSERT $value > 0;
 DEFINE FIELD currency ON payment_intent TYPE string DEFAULT "USD";
-DEFINE FIELD status ON payment_intent TYPE string ASSERT $value INSIDE ["requires_payment_method", "requires_confirmation", "requires_action", "processing", "succeeded", "canceled"];
+DEFINE FIELD status ON payment_intent TYPE string ASSERT $value INSIDE ["requires_payment_method", "requires_confirmation", "requires_action", "processing", "requires_capture", "succeeded", "canceled"];
+DEFINE FIELD mode ON payment_intent TYPE string DEFAULT "payment" ASSERT $value INSIDE ["payment", "setup"];
 DEFINE FIELD payment_method_id ON payment_intent TYPE option<string>;
 DEFINE FIELD article_id ON payment_intent TYPE option<record(article)>;
 DEFINE FIELD metadata ON payment_intent TYPE object DEFAULT {};
@@ -511,6 +519,41 @@ DEFINE INDEX stripe_subscription_internal_id_idx ON stripe_subscription COLUMNS 
 DEFINE INDEX stripe_subscription_customer_idx ON stripe_subscription COLUMNS stripe_customer_id;
 DEFINE INDEX stripe_subscription_status_idx ON stripe_subscription COLUMNS status;
 
+-- Stripe支付方式表
+DEFINE TABLE stripe_payment_method SCHEMAFULL;
+DEFINE FIELD id ON stripe_payment_method TYPE record(stripe_payment_method);
+DEFINE FIELD user_id ON stripe_payment_method TYPE string ASSERT $value != NONE;
+DEFINE FIELD stripe_payment_method_id ON stripe_payment_method TYPE string ASSERT $value != NONE;
+DEFINE FIELD payment_method_type ON stripe_payment_method TYPE string ASSERT $value INSIDE ["card", "bank_account", "alipay", "wechat"];
+DEFINE FIELD card_brand ON stripe_payment_method TYPE option<string>;
+DEFINE FIELD card_last4 ON stripe_payment_method TYPE option<string>;
+DEFINE FIELD card_exp_month ON stripe_payment_method TYPE option<number>;
+DEFINE FIELD card_exp_year ON stripe_payment_method TYPE option<number>;
+DEFINE FIELD is_default ON stripe_payment_method TYPE bool DEFAULT false;
+DEFINE FIELD created_at ON stripe_payment_method TYPE datetime DEFAULT time::now();
+DEFINE FIELD updated_at ON stripe_payment_method TYPE datetime DEFAULT time::now();
+
+DEFINE INDEX stripe_payment_method_user_idx ON stripe_payment_method COLUMNS user_id;
+DEFINE INDEX stripe_payment_method_stripe_id_idx ON stripe_payment_method COLUMNS stripe_payment_method_id UNIQUE;
+
+-- Stripe Connect 账户表
+DEFINE TABLE connect_account SCHEMAFULL;
+DEFINE FIELD id ON connect_account TYPE record(connect_account);
+DEFINE FIELD user_id ON connect_account TYPE string ASSERT $value != NONE;
+DEFINE FIELD stripe_account_id ON connect_account TYPE string ASSERT $value != NONE;
+DEFINE FIELD account_type ON connect_account TYPE string ASSERT $value INSIDE ["express", "standard", "custom"];
+DEFINE FIELD country ON connect_account TYPE string ASSERT $value != NONE;
+DEFINE FIELD currency ON connect_account TYPE string DEFAULT "USD";
+DEFINE FIELD details_submitted ON connect_account TYPE bool DEFAULT false;
+DEFINE FIELD charges_enabled ON connect_account TYPE bool DEFAULT false;
+DEFINE FIELD payouts_enabled ON connect_account TYPE bool DEFAULT false;
+DEFINE FIELD requirements ON connect_account TYPE object DEFAULT {};
+DEFINE FIELD created_at ON connect_account TYPE datetime DEFAULT time::now();
+DEFINE FIELD updated_at ON connect_account TYPE datetime DEFAULT time::now();
+
+DEFINE INDEX connect_account_user_idx ON connect_account COLUMNS user_id;
+DEFINE INDEX connect_account_stripe_id_idx ON connect_account COLUMNS stripe_account_id UNIQUE;
+
 -- Webhook事件表
 DEFINE TABLE webhook_event SCHEMAFULL;
 DEFINE FIELD id ON webhook_event TYPE record(webhook_event);
@@ -519,6 +562,7 @@ DEFINE FIELD event_type ON webhook_event TYPE string ASSERT $value != NONE;
 DEFINE FIELD processed ON webhook_event TYPE bool DEFAULT false;
 DEFINE FIELD processed_at ON webhook_event TYPE option<datetime>;
 DEFINE FIELD data ON webhook_event TYPE object;
+DEFINE FIELD processing_summary ON webhook_event TYPE option<object>;
 DEFINE FIELD created_at ON webhook_event TYPE datetime DEFAULT time::now();
 
 -- Webhook事件索引

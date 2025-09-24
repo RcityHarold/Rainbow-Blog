@@ -4653,6 +4653,8 @@ dependencies = [
  "futures-util",
  "governor",
  "handlebars",
+ "hex",
+ "hmac",
  "image",
  "imagesize",
  "jsonwebtoken",

@@ -184,6 +184,17 @@ pub struct RevenueDashboard {
     pub bank_accounts: Vec<BankAccount>,
     pub minimum_payout_amount: i64,
     pub next_payout_date: Option<DateTime<Utc>>,
+    pub connect_status: ConnectStatus,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConnectStatus {
+    pub has_connect_account: bool,
+    pub charges_enabled: bool,
+    pub payouts_enabled: bool,
+    pub details_submitted: bool,
+    #[serde(default)]
+    pub requirements_due: Vec<String>,
 }
 
 /// 收益分成配置

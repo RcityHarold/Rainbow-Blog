@@ -372,7 +372,7 @@ GET /api/blog/subscriptions/user/{user_id}
 ### 检查用户订阅状态
 
 ```http
-GET /api/blog/subscriptions/check/{creator_id}
+GET /api/blog/subscriptions/creator/{creator_id}/status
 ```
 
 **认证**: 必需
@@ -385,20 +385,32 @@ GET /api/blog/subscriptions/check/{creator_id}
 {
   "success": true,
   "data": {
-    "is_subscribed": true,
-    "subscription": {
-      "id": "subscription:987fcdeb-51a2-43d1-b456-426614174111",
-      "plan": {
-        "id": "subscription_plan:123e4567-e89b-12d3-a456-426614174000",
-        "name": "高级会员"
+    "account": {
+      "id": "connect_account:123e4567-e89b-12d3-a456-426614174000",
+      "user_id": "user_456",
+      "stripe_account_id": "acct_ABC123",
+      "account_type": "express",
+      "country": "US",
+      "currency": "usd",
+      "details_submitted": true,
+      "charges_enabled": true,
+      "payouts_enabled": true,
+      "requirements": {
+        "currently_due": [],
+        "eventually_due": [],
+        "past_due": [],
+        "pending_verification": []
       },
-      "status": "active",
-      "current_period_end": "2024-02-20T11:00:00Z"
+      "created_at": "2024-01-20T10:30:00Z",
+      "updated_at": "2024-01-20T11:45:00Z"
     },
-    "can_access_paid_content": true
+    "onboarding_url": null,
+    "requires_onboarding": false
   }
 }
 ```
+
+> 未订阅时返回 404 (`{"message":"未订阅该创作者"}`)。
 
 ### 获取创作者收益统计
 
@@ -601,7 +613,7 @@ async function subscribe(planId, paymentMethodId, token) {
 // 检查订阅状态
 async function checkSubscription(creatorId, token) {
   const response = await fetch(
-    `/api/blog/subscriptions/check/${creatorId}`, {
+    `/api/blog/subscriptions/creator/${creatorId}/status`, {
     headers: {
       'Authorization': `Bearer ${token}`
     }
@@ -1908,23 +1920,27 @@ POST /api/blog/stripe/connect/accounts
 {
   "success": true,
   "data": {
-    "id": "connect_account:123e4567-e89b-12d3-a456-426614174000",
-    "user_id": "user_456",
-    "stripe_account_id": "acct_ABC123",
-    "account_type": "express",
-    "country": "US",
-    "currency": "usd",
-    "details_submitted": false,
-    "charges_enabled": false,
-    "payouts_enabled": false,
-    "requirements": {
-      "currently_due": ["external_account", "tos_acceptance.date"],
-      "eventually_due": ["business_profile.mcc", "business_profile.url"],
-      "past_due": [],
-      "pending_verification": []
+    "account": {
+      "id": "connect_account:123e4567-e89b-12d3-a456-426614174000",
+      "user_id": "user_456",
+      "stripe_account_id": "acct_ABC123",
+      "account_type": "express",
+      "country": "US",
+      "currency": "usd",
+      "details_submitted": false,
+      "charges_enabled": false,
+      "payouts_enabled": false,
+      "requirements": {
+        "currently_due": ["external_account", "tos_acceptance.date"],
+        "eventually_due": ["business_profile.mcc", "business_profile.url"],
+        "past_due": [],
+        "pending_verification": []
+      },
+      "created_at": "2024-01-20T10:30:00Z",
+      "updated_at": "2024-01-20T10:30:00Z"
     },
-    "created_at": "2024-01-20T10:30:00Z",
-    "updated_at": "2024-01-20T10:30:00Z"
+    "onboarding_url": "https://connect.stripe.com/setup/s/xyz",
+    "requires_onboarding": true
   }
 }
 ```

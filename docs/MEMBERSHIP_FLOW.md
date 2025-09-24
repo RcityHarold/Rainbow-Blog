@@ -124,7 +124,7 @@ This document defines the end-to-end flow for Rainbow Blog's membership system, 
 
 ## 6. Backend TODO Checklist
 
-- [ ] Replace all `user_123` placeholders with authenticated user IDs in subscription & stripe routes.
+- [x] Replace all `user_123` placeholders with authenticated user IDs in subscription & stripe routes.
 - [ ] Implement payment-method endpoints in `payments.rs` leveraging Stripe service.
 - [ ] Complete Stripe service functions: customers, SetupIntents, subscriptions, cancelation, Connect onboarding.
 - [ ] Verify webhook signature handling and update subscription/payment status accordingly.

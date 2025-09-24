@@ -1,5 +1,5 @@
-use serde::{Deserialize, Serialize};
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 use validator::Validate;
 
 /// Stripe客户配置
@@ -39,6 +39,20 @@ pub enum PaymentMethodType {
     BankAccount,
     Alipay,
     Wechat,
+}
+
+/// Stripe意图模式
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum StripeIntentMode {
+    Payment,
+    Setup,
+}
+
+impl Default for StripeIntentMode {
+    fn default() -> Self {
+        StripeIntentMode::Payment
+    }
 }
 
 /// Stripe订阅
@@ -82,11 +96,21 @@ pub struct StripePaymentIntent {
     pub amount: i64,
     pub currency: String,
     pub status: PaymentIntentStatus,
+    pub mode: StripeIntentMode,
     pub payment_method_id: Option<String>,
     pub article_id: Option<String>, // 文章购买
     pub metadata: serde_json::Value,
+    pub client_secret: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StripeIntentResponse {
+    pub mode: StripeIntentMode,
+    pub client_secret: String,
+    pub payment_intent: Option<StripePaymentIntent>,
+    pub setup_intent_id: Option<String>,
 }
 
 /// 支付意图状态
@@ -117,6 +141,13 @@ pub struct StripeConnectAccount {
     pub requirements: serde_json::Value,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConnectAccountResponse {
+    pub account: StripeConnectAccount,
+    pub onboarding_url: Option<String>,
+    pub requires_onboarding: bool,
 }
 
 /// Connect账户类型
@@ -170,18 +201,29 @@ pub struct StripeWebhookEvent {
 }
 
 /// 创建支付意图请求
-#[derive(Debug, Validate, Deserialize)]
-pub struct CreatePaymentIntentRequest {
-    #[validate(range(min = 50))] // 最低$0.50
-    pub amount: i64,
-    
-    #[validate(length(min = 3, max = 3))]
-    pub currency: String,
-    
+#[derive(Debug, Deserialize)]
+pub struct CreateStripeIntentRequest {
+    #[serde(default)]
+    pub mode: StripeIntentMode,
+
+    #[serde(default)]
+    pub amount: Option<i64>,
+
+    #[serde(default)]
+    pub currency: Option<String>,
+
     pub payment_method_id: Option<String>,
     pub article_id: Option<String>,
     pub confirm: Option<bool>,
     pub metadata: Option<serde_json::Value>,
+}
+
+/// 添加支付方式请求
+#[derive(Debug, Deserialize)]
+pub struct CreatePaymentMethodRequest {
+    pub payment_method_id: String,
+    #[serde(default)]
+    pub set_as_default: bool,
 }
 
 /// 创建订阅请求
@@ -199,7 +241,7 @@ pub struct CreateStripeSubscriptionRequest {
 pub struct CreateConnectAccountRequest {
     #[validate(length(min = 2, max = 2))]
     pub country: String,
-    
+
     pub account_type: ConnectAccountType,
     pub email: String,
     pub business_type: Option<String>,
@@ -213,16 +255,38 @@ pub struct StripeConfig {
     pub publishable_key: String,
     pub webhook_endpoint_secret: String,
     pub connect_client_id: Option<String>,
+    pub connect_return_url: Option<String>,
+    pub connect_refresh_url: Option<String>,
     pub api_version: String,
 }
 
 impl Default for StripeConfig {
     fn default() -> Self {
+        let frontend_url =
+            std::env::var("FRONTEND_URL").unwrap_or_else(|_| "http://localhost:3001".to_string());
+        let frontend_base = frontend_url.trim_end_matches('/');
+        let default_return = std::env::var("STRIPE_CONNECT_RETURN_URL").ok().or_else(|| {
+            Some(format!(
+                "{}/settings#billing?connect=success",
+                frontend_base
+            ))
+        });
+        let default_refresh = std::env::var("STRIPE_CONNECT_REFRESH_URL")
+            .ok()
+            .or_else(|| {
+                Some(format!(
+                    "{}/settings#billing?connect=refresh",
+                    frontend_base
+                ))
+            });
+
         Self {
             secret_key: std::env::var("STRIPE_SECRET_KEY").unwrap_or_default(),
             publishable_key: std::env::var("STRIPE_PUBLISHABLE_KEY").unwrap_or_default(),
             webhook_endpoint_secret: std::env::var("STRIPE_WEBHOOK_SECRET").unwrap_or_default(),
             connect_client_id: std::env::var("STRIPE_CONNECT_CLIENT_ID").ok(),
+            connect_return_url: default_return,
+            connect_refresh_url: default_refresh,
             api_version: "2023-10-16".to_string(),
         }
     }

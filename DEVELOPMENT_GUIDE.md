@@ -72,6 +72,52 @@ Rainbow-Blog 是一个基于 Medium 风格的博客系统，完全复刻 Medium 
 - Stripe 支付与 Connect 结算（详见 [docs/MEMBERSHIP_FLOW.md](docs/MEMBERSHIP_FLOW.md)）
 - 访问控制与内容预览逻辑
 
+#### Stripe 集成任务拆解（进行中）
+
+- [x] 后端：完善 `/api/blog/stripe/payment-intents` 以支持 SetupIntent 与 PaymentIntent，并返回可供前端使用的 `client_secret`。
+- [x] 后端：实现 `/api/blog/payment-methods` 系列接口（新增/列出/删除/设为默认），同步存储 Stripe 支付方式元数据。
+- [x] 后端：替换订阅路由中的临时用户 ID，串联 Stripe 订阅创建、取消与状态查询，并补齐必要的权限校验。
+- [ ] 后端：实现 Stripe Connect 账户创建、状态查询与回跳链接生成，将 `stripe_account_id` 持久化。
+- [ ] 后端：补全 Stripe Webhook 事件处理（支付成功/失败、订阅更新等），驱动收益与访问权限的状态同步。
+- [ ] 后端：在收益与付费内容服务中记录 Stripe 交易结果，确保创作者仪表盘与访问控制数据实时更新。
+- [x] 前端：调整支付方式管理组件，串接新的 SetupIntent 流程与错误提示。
+- [x] 前端：更新订阅与单篇购买流程，适配新的 API 响应与错误态，并在缺少默认支付方式时给出引导。
+- [x] 前端：同步设置页与收益页的 Stripe Connect 状态展示，覆盖未完成接入、需重定向等场景。
+
+
+
+后端任务拆分（Stripe Connect + 订阅）
+
+- [x] user_profile / 数据结构
+  - [x] 在 `schemas/blog_schema.sql` 增加 `stripe_customer_id`、`stripe_account_id` 字段并生成迁移。
+  - [x] 更新 `src/models/user.rs`、`src/services/user.rs` 等处的结构体/初始化代码，确保读写新字段。
+  - [x] 核对已有接口返回的用户资料（Profile API）是否包含新字段，补充序列化。
+- [x] 支付方式 API (`payments.rs`)
+  - [x] `GET /payment-methods`：校验用户身份，返回 Stripe 与本地的支付方式列表。
+  - [x] `POST /payment-methods`：触发 `StripeService` 绑定，成功后刷新默认卡并返回最新列表。
+  - [x] `DELETE /payment-methods/{id}` 与 `POST /.../default`：完成权限校验、调用 Stripe 解绑/设默认并更新本地记录。
+- [x] StripeService 核心函数
+  - [x] 完成客户获取/创建、SetupIntent 创建、订阅创建/取消方法，处理 Stripe API 异常。
+  - [x] 创建/更新本地 `stripe_subscription`、`stripe_payment_method` 等记录，保持状态一致。
+  - [x] 提供 Connect onboarding 支持：创建 account、生成 account link、刷新账户状态。
+- [x] Stripe Webhook
+  - [x] 验证签名（`Stripe-Signature`），解析事件并落库 `webhook_event`。
+  - [x] 处理 `invoice.payment_succeeded/failed`、`customer.subscription.updated/deleted` 等事件，同步订阅状态与收益。
+  - [x] 记录处理结果、避免重复执行（幂等校验）。
+- [x] 收益与付费内容同步
+  - [x] 在收益服务写入 `creator_earning`、`creator_earning_summary`，更新仪表盘指标。
+  - [x] 支付成功后刷新文章访问控制缓存，确保订阅用户可立即访问付费内容。
+  - [x] 补充必要的日志与监控指标（新收益、新订阅）。
+前端任务拆分（Rainbow-Blog-Front）
+
+- [x] 在项目入口加载 Stripe publishable key（环境变量或配置接口），初始化 Stripe.js 并封装通用 Hook。
+- [x] 支付方式管理界面串联新的 API：触发 SetupIntent → 提交付款方式 → 展示列表/设默认/删除的前端逻辑与异常提示。
+- [x] SubscriptionWidget 调整：在缺少默认支付方式时展示指引，处理订阅创建成功后的状态刷新及错误反馈。
+- [x] 设置页 Billing 模块：展示 Connect 状态（未开户/待认证/成功），并提供“补完 onboarding”按钮。
+- [x] 订阅取消 & 账单历史 UI：对接后端接口，增加取消确认流程与历史账单明细展示。
+- [x] 付费内容提示：在文章页、收益页等位置补充订阅引导文案及跳转逻辑。
+
+
 ## 项目结构
 
 ```

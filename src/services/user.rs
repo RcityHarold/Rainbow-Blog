@@ -6,10 +6,10 @@ use crate::{
 use chrono::Utc;
 use serde_json::{json, Value};
 use std::sync::Arc;
-use tracing::{debug, info, error};
+use surrealdb::sql::Thing;
+use tracing::{debug, error, info};
 use uuid::Uuid;
 use validator::Validate;
-use surrealdb::sql::Thing;
 
 /// 用户服务，处理用户相关的业务逻辑
 #[derive(Clone)]
@@ -26,31 +26,33 @@ impl UserService {
     /// 创建新用户资料
     pub async fn create_profile(&self, user_id: &str, email: &str) -> Result<UserProfile> {
         debug!("Creating new user profile for user: {}", user_id);
-        
+
         // 检查是否已有资料
         if let Some(existing) = self.get_profile_by_user_id(user_id).await? {
             return Ok(existing);
         }
 
         // 从邮箱生成用户名
-        let mut base_username = email.split('@').next()
+        let mut base_username = email
+            .split('@')
+            .next()
             .unwrap_or("user")
             .chars()
             .filter(|c| c.is_alphanumeric() || *c == '_' || *c == '-')
             .collect::<String>()
             .to_lowercase();
-            
+
         // 确保用户名至少有3个字符
         if base_username.len() < 3 {
             base_username = format!("user_{}", base_username);
         }
-            
+
         let original_username = if base_username.is_empty() {
             format!("user{}", Uuid::new_v4().simple())
         } else {
             base_username
         };
-        
+
         // 生成唯一用户名
         let mut profile = UserProfile {
             id: Thing {
@@ -61,7 +63,7 @@ impl UserService {
             username: original_username.clone(),
             display_name: original_username.clone(),
             email: Some(email.to_string()), // 添加邮箱字段
-            email_verified: Some(false), // 默认未验证，稍后从Rainbow-Auth获取真实状态
+            email_verified: Some(false),    // 默认未验证，稍后从Rainbow-Auth获取真实状态
             bio: None,
             avatar_url: None,
             cover_image_url: None,
@@ -71,6 +73,8 @@ impl UserService {
             github_username: None,
             linkedin_url: None,
             facebook_url: None,
+            stripe_customer_id: None,
+            stripe_account_id: None,
             follower_count: 0,
             following_count: 0,
             article_count: 0,
@@ -80,15 +84,17 @@ impl UserService {
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };
-        
+
         // 确保用户名唯一
         let mut counter = 1;
         while self.is_username_taken(&profile.username).await? {
             profile.username = format!("{}_{}", original_username, counter);
             counter += 1;
-            
+
             if counter > 100 {
-                return Err(AppError::Internal("Failed to generate unique username".to_string()));
+                return Err(AppError::Internal(
+                    "Failed to generate unique username".to_string(),
+                ));
             }
         }
 
@@ -111,6 +117,8 @@ impl UserService {
                 github_username: {},
                 linkedin_url: {},
                 facebook_url: {},
+                stripe_customer_id: NULL,
+                stripe_account_id: NULL,
                 follower_count: {},
                 following_count: {},
                 article_count: {},
@@ -125,17 +133,57 @@ impl UserService {
             profile.user_id,
             profile.username,
             profile.display_name,
-            profile.email.as_ref().map(|s| format!("\"{}\"", s)).unwrap_or("NULL".to_string()),
+            profile
+                .email
+                .as_ref()
+                .map(|s| format!("\"{}\"", s))
+                .unwrap_or("NULL".to_string()),
             profile.email_verified.unwrap_or(false),
-            profile.bio.as_ref().map(|s| format!("\"{}\"", s)).unwrap_or("NULL".to_string()),
-            profile.avatar_url.as_ref().map(|s| format!("\"{}\"", s)).unwrap_or("NULL".to_string()),
-            profile.cover_image_url.as_ref().map(|s| format!("\"{}\"", s)).unwrap_or("NULL".to_string()),
-            profile.website.as_ref().map(|s| format!("\"{}\"", s)).unwrap_or("NULL".to_string()),
-            profile.location.as_ref().map(|s| format!("\"{}\"", s)).unwrap_or("NULL".to_string()),
-            profile.twitter_username.as_ref().map(|s| format!("\"{}\"", s)).unwrap_or("NULL".to_string()),
-            profile.github_username.as_ref().map(|s| format!("\"{}\"", s)).unwrap_or("NULL".to_string()),
-            profile.linkedin_url.as_ref().map(|s| format!("\"{}\"", s)).unwrap_or("NULL".to_string()),
-            profile.facebook_url.as_ref().map(|s| format!("\"{}\"", s)).unwrap_or("NULL".to_string()),
+            profile
+                .bio
+                .as_ref()
+                .map(|s| format!("\"{}\"", s))
+                .unwrap_or("NULL".to_string()),
+            profile
+                .avatar_url
+                .as_ref()
+                .map(|s| format!("\"{}\"", s))
+                .unwrap_or("NULL".to_string()),
+            profile
+                .cover_image_url
+                .as_ref()
+                .map(|s| format!("\"{}\"", s))
+                .unwrap_or("NULL".to_string()),
+            profile
+                .website
+                .as_ref()
+                .map(|s| format!("\"{}\"", s))
+                .unwrap_or("NULL".to_string()),
+            profile
+                .location
+                .as_ref()
+                .map(|s| format!("\"{}\"", s))
+                .unwrap_or("NULL".to_string()),
+            profile
+                .twitter_username
+                .as_ref()
+                .map(|s| format!("\"{}\"", s))
+                .unwrap_or("NULL".to_string()),
+            profile
+                .github_username
+                .as_ref()
+                .map(|s| format!("\"{}\"", s))
+                .unwrap_or("NULL".to_string()),
+            profile
+                .linkedin_url
+                .as_ref()
+                .map(|s| format!("\"{}\"", s))
+                .unwrap_or("NULL".to_string()),
+            profile
+                .facebook_url
+                .as_ref()
+                .map(|s| format!("\"{}\"", s))
+                .unwrap_or("NULL".to_string()),
             profile.follower_count,
             profile.following_count,
             profile.article_count,
@@ -143,27 +191,35 @@ impl UserService {
             profile.is_verified,
             profile.is_suspended,
         );
-        
+
         let mut response = self.db.query(&create_query).await?;
         let created: Vec<UserProfile> = response.take(0)?;
-        
+
         if created.is_empty() {
             error!("No user profile was created for user: {}", user_id);
-            return Err(AppError::Internal("Failed to create user profile".to_string()));
+            return Err(AppError::Internal(
+                "Failed to create user profile".to_string(),
+            ));
         }
-        
+
         let created_profile = created.into_iter().next().unwrap();
-        info!("Created new user profile for user: {} with username: {}", user_id, created_profile.username);
-        
+        info!(
+            "Created new user profile for user: {} with username: {}",
+            user_id, created_profile.username
+        );
+
         Ok(created_profile)
     }
 
     /// 根据用户ID获取用户资料
     pub async fn get_profile_by_user_id(&self, user_id: &str) -> Result<Option<UserProfile>> {
         debug!("Getting user profile by user_id: {}", user_id);
-        
+
         let query = "SELECT * FROM user_profile WHERE user_id = $user_id LIMIT 1";
-        let mut response = self.db.query_with_params(query, json!({ "user_id": user_id })).await?;
+        let mut response = self
+            .db
+            .query_with_params(query, json!({ "user_id": user_id }))
+            .await?;
         let profiles: Vec<UserProfile> = response.take(0)?;
         Ok(profiles.into_iter().next())
     }
@@ -177,9 +233,15 @@ impl UserService {
             AND is_deleted = false 
             AND status = 'published'
         "#;
-        let mut resp = self.db.query_with_params(query, json!({
-            "user_id": user_id
-        })).await?;
+        let mut resp = self
+            .db
+            .query_with_params(
+                query,
+                json!({
+                    "user_id": user_id
+                }),
+            )
+            .await?;
         if let Ok(Some(row)) = resp.take::<Option<Value>>(0) {
             Ok(row.get("count").and_then(|v| v.as_i64()).unwrap_or(0))
         } else {
@@ -194,9 +256,15 @@ impl UserService {
             FROM follow 
             WHERE following_id = $user_id
         "#;
-        let mut resp = self.db.query_with_params(query, json!({
-            "user_id": user_id
-        })).await?;
+        let mut resp = self
+            .db
+            .query_with_params(
+                query,
+                json!({
+                    "user_id": user_id
+                }),
+            )
+            .await?;
         if let Ok(Some(row)) = resp.take::<Option<Value>>(0) {
             Ok(row.get("count").and_then(|v| v.as_i64()).unwrap_or(0))
         } else {
@@ -211,9 +279,15 @@ impl UserService {
             FROM follow 
             WHERE follower_id = $user_id
         "#;
-        let mut resp = self.db.query_with_params(query, json!({
-            "user_id": user_id
-        })).await?;
+        let mut resp = self
+            .db
+            .query_with_params(
+                query,
+                json!({
+                    "user_id": user_id
+                }),
+            )
+            .await?;
         if let Ok(Some(row)) = resp.take::<Option<Value>>(0) {
             Ok(row.get("count").and_then(|v| v.as_i64()).unwrap_or(0))
         } else {
@@ -224,20 +298,27 @@ impl UserService {
     /// 根据用户名获取用户资料
     pub async fn get_profile_by_username(&self, username: &str) -> Result<Option<UserProfile>> {
         debug!("Getting user profile by username: {}", username);
-        
+
         self.db.find_one("user_profile", "username", username).await
     }
 
     /// 更新用户资料
-    pub async fn update_profile(&self, user_id: &str, update_request: UpdateUserProfileRequest) -> Result<UserProfile> {
+    pub async fn update_profile(
+        &self,
+        user_id: &str,
+        update_request: UpdateUserProfileRequest,
+    ) -> Result<UserProfile> {
         debug!("Updating user profile for user: {}", user_id);
 
         // 验证输入
-        update_request.validate()
+        update_request
+            .validate()
             .map_err(|e| AppError::ValidatorError(e))?;
 
         // 获取现有资料
-        let mut profile = self.get_profile_by_user_id(user_id).await?
+        let mut profile = self
+            .get_profile_by_user_id(user_id)
+            .await?
             .ok_or_else(|| AppError::NotFound("User profile not found".to_string()))?;
 
         // 更新字段
@@ -275,59 +356,86 @@ impl UserService {
         profile.updated_at = Utc::now();
 
         // 更新数据库
-        let result = self.db.update(profile.id.clone(), profile).await?
+        let result = self
+            .db
+            .update(profile.id.clone(), profile)
+            .await?
             .ok_or_else(|| AppError::NotFound("Failed to update profile".to_string()))?;
-        
+
         info!("Updated user profile for user: {}", user_id);
-        
+
         Ok(result)
     }
 
     /// 检查用户名是否已被使用
     pub async fn is_username_taken(&self, username: &str) -> Result<bool> {
         let query = "SELECT count() AS count FROM user_profile WHERE username = $username";
-        let mut response = self.db.query_with_params(query, json!({ "username": username })).await?;
-        
+        let mut response = self
+            .db
+            .query_with_params(query, json!({ "username": username }))
+            .await?;
+
         if let Ok(Some(result)) = response.take::<Option<Value>>(0) {
             if let Some(count) = result.get("count").and_then(|v| v.as_i64()) {
                 return Ok(count > 0);
             }
         }
-        
+
         Ok(false)
     }
 
     /// 获取用户统计信息
     pub async fn get_user_stats(&self, user_id: &str) -> Result<UserActivitySummary> {
         debug!("Getting user statistics for user: {}", user_id);
-        
+
         // 获取文章统计
         let articles_query = "SELECT count() AS count FROM article WHERE user_id = $user_id";
-        let mut articles_response = self.db.query_with_params(articles_query, json!({ "user_id": user_id })).await?;
+        let mut articles_response = self
+            .db
+            .query_with_params(articles_query, json!({ "user_id": user_id }))
+            .await?;
         let article_count = if let Ok(Some(result)) = articles_response.take::<Option<Value>>(0) {
             result.get("count").and_then(|v| v.as_i64()).unwrap_or(0)
-        } else { 0 };
-        
+        } else {
+            0
+        };
+
         // 获取评论统计
         let comments_query = "SELECT count() AS count FROM comment WHERE user_id = $user_id";
-        let mut comments_response = self.db.query_with_params(comments_query, json!({ "user_id": user_id })).await?;
+        let mut comments_response = self
+            .db
+            .query_with_params(comments_query, json!({ "user_id": user_id }))
+            .await?;
         let comment_count = if let Ok(Some(result)) = comments_response.take::<Option<Value>>(0) {
             result.get("count").and_then(|v| v.as_i64()).unwrap_or(0)
-        } else { 0 };
-        
+        } else {
+            0
+        };
+
         // 获取关注者统计
         let followers_query = "SELECT count() AS count FROM follow WHERE following = $user_id";
-        let mut followers_response = self.db.query_with_params(followers_query, json!({ "user_id": user_id })).await?;
+        let mut followers_response = self
+            .db
+            .query_with_params(followers_query, json!({ "user_id": user_id }))
+            .await?;
         let follower_count = if let Ok(Some(result)) = followers_response.take::<Option<Value>>(0) {
             result.get("count").and_then(|v| v.as_i64()).unwrap_or(0)
-        } else { 0 };
-        
+        } else {
+            0
+        };
+
         // 获取关注统计
         let following_query = "SELECT count() AS count FROM follow WHERE follower = $user_id";
-        let mut following_response = self.db.query_with_params(following_query, json!({ "user_id": user_id })).await?;
-        let following_count = if let Ok(Some(result)) = following_response.take::<Option<Value>>(0) {
+        let mut following_response = self
+            .db
+            .query_with_params(following_query, json!({ "user_id": user_id }))
+            .await?;
+        let following_count = if let Ok(Some(result)) = following_response.take::<Option<Value>>(0)
+        {
             result.get("count").and_then(|v| v.as_i64()).unwrap_or(0)
-        } else { 0 };
+        } else {
+            0
+        };
 
         // 获取用户给出的拍手数
         let claps_given_query = r#"
@@ -335,14 +443,25 @@ impl UserService {
             FROM clap 
             WHERE user_id = $user_id
         "#;
-        
-        let mut claps_given_response = self.db.query_with_params(claps_given_query, json!({
-            "user_id": user_id
-        })).await?;
-        
+
+        let mut claps_given_response = self
+            .db
+            .query_with_params(
+                claps_given_query,
+                json!({
+                    "user_id": user_id
+                }),
+            )
+            .await?;
+
         let claps_given = if let Ok(Some(result)) = claps_given_response.take::<Option<Value>>(0) {
-            result.get("total_claps").and_then(|v| v.as_i64()).unwrap_or(0)
-        } else { 0 };
+            result
+                .get("total_claps")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0)
+        } else {
+            0
+        };
 
         // 获取用户收到的拍手数（通过用户的文章）
         let claps_received_query = r#"
@@ -351,14 +470,26 @@ impl UserService {
             JOIN article a ON c.article_id = a.id
             WHERE a.author_id = $user_id
         "#;
-        
-        let mut claps_received_response = self.db.query_with_params(claps_received_query, json!({
-            "user_id": user_id
-        })).await?;
-        
-        let claps_received = if let Ok(Some(result)) = claps_received_response.take::<Option<Value>>(0) {
-            result.get("total_claps").and_then(|v| v.as_i64()).unwrap_or(0)
-        } else { 0 };
+
+        let mut claps_received_response = self
+            .db
+            .query_with_params(
+                claps_received_query,
+                json!({
+                    "user_id": user_id
+                }),
+            )
+            .await?;
+
+        let claps_received =
+            if let Ok(Some(result)) = claps_received_response.take::<Option<Value>>(0) {
+                result
+                    .get("total_claps")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(0)
+            } else {
+                0
+            };
 
         Ok(UserActivitySummary {
             articles_written: article_count,
@@ -373,20 +504,30 @@ impl UserService {
     /// 更新最后活跃时间
     pub async fn update_last_active(&self, user_id: &str) -> Result<()> {
         debug!("Updating last active time for user: {}", user_id);
-        
+
         let update_query = "UPDATE user_profile SET last_active_at = $now WHERE user_id = $user_id";
-        self.db.query_with_params(update_query, json!({ 
-            "user_id": user_id,
-            "now": Utc::now()
-        })).await?;
-        
+        self.db
+            .query_with_params(
+                update_query,
+                json!({
+                    "user_id": user_id,
+                    "now": Utc::now()
+                }),
+            )
+            .await?;
+
         Ok(())
     }
 
     /// 获取用户列表（分页）
-    pub async fn get_users(&self, page: usize, limit: usize, search: Option<String>) -> Result<crate::services::database::PaginatedResult<UserProfile>> {
+    pub async fn get_users(
+        &self,
+        page: usize,
+        limit: usize,
+        search: Option<String>,
+    ) -> Result<crate::services::database::PaginatedResult<UserProfile>> {
         let offset = (page - 1) * limit;
-        
+
         let (query, params) = if let Some(search_term) = search.clone() {
             let query_str = r#"
                 SELECT * FROM user_profile 
@@ -394,44 +535,52 @@ impl UserService {
                 ORDER BY created_at DESC
                 LIMIT $limit START $offset
             "#;
-            (query_str, json!({
-                "search": search_term,
-                "limit": limit,
-                "offset": offset
-            }))
+            (
+                query_str,
+                json!({
+                    "search": search_term,
+                    "limit": limit,
+                    "offset": offset
+                }),
+            )
         } else {
             let query_str = r#"
                 SELECT * FROM user_profile 
                 ORDER BY created_at DESC
                 LIMIT $limit START $offset
             "#;
-            (query_str, json!({
-                "limit": limit,
-                "offset": offset
-            }))
+            (
+                query_str,
+                json!({
+                    "limit": limit,
+                    "offset": offset
+                }),
+            )
         };
-        
+
         let mut response = self.db.query_with_params(query, params).await?;
         let profiles: Vec<UserProfile> = response.take(0)?;
-        
+
         // 获取总数
         let count_query = if search.is_some() {
             "SELECT count() AS total FROM user_profile WHERE username ~ $search OR display_name ~ $search OR email ~ $search"
         } else {
             "SELECT count() AS total FROM user_profile"
         };
-        
+
         let count_params = if let Some(search_term) = search {
             json!({ "search": search_term })
         } else {
             json!({})
         };
-        
+
         let mut count_response = self.db.query_with_params(count_query, count_params).await?;
         let total = if let Ok(Some(result)) = count_response.take::<Option<Value>>(0) {
             result.get("total").and_then(|v| v.as_i64()).unwrap_or(0) as usize
-        } else { 0 };
-        
+        } else {
+            0
+        };
+
         Ok(crate::services::database::PaginatedResult {
             data: profiles,
             total,
@@ -444,19 +593,25 @@ impl UserService {
     /// 搜索用户
     pub async fn search_users(&self, query: &str, limit: usize) -> Result<Vec<UserProfile>> {
         debug!("Searching users with query: {}", query);
-        
+
         let search_query = r#"
             SELECT * FROM user_profile 
             WHERE username ~ $query OR display_name ~ $query OR bio ~ $query
             ORDER BY follower_count DESC
             LIMIT $limit
         "#;
-        
-        let mut response = self.db.query_with_params(search_query, json!({
-            "query": query,
-            "limit": limit
-        })).await?;
-        
+
+        let mut response = self
+            .db
+            .query_with_params(
+                search_query,
+                json!({
+                    "query": query,
+                    "limit": limit
+                }),
+            )
+            .await?;
+
         let profiles: Vec<UserProfile> = response.take(0)?;
         Ok(profiles)
     }
@@ -464,39 +619,47 @@ impl UserService {
     /// 增加关注者数量
     pub async fn increment_follower_count(&self, user_id: &str) -> Result<()> {
         let update_query = "UPDATE user_profile SET follower_count += 1 WHERE user_id = $user_id";
-        self.db.query_with_params(update_query, json!({ "user_id": user_id })).await?;
+        self.db
+            .query_with_params(update_query, json!({ "user_id": user_id }))
+            .await?;
         Ok(())
     }
 
     /// 减少关注者数量
     pub async fn decrement_follower_count(&self, user_id: &str) -> Result<()> {
         let update_query = "UPDATE user_profile SET follower_count -= 1 WHERE user_id = $user_id AND follower_count > 0";
-        self.db.query_with_params(update_query, json!({ "user_id": user_id })).await?;
+        self.db
+            .query_with_params(update_query, json!({ "user_id": user_id }))
+            .await?;
         Ok(())
     }
 
     /// 增加关注数量
     pub async fn increment_following_count(&self, user_id: &str) -> Result<()> {
         let update_query = "UPDATE user_profile SET following_count += 1 WHERE user_id = $user_id";
-        self.db.query_with_params(update_query, json!({ "user_id": user_id })).await?;
+        self.db
+            .query_with_params(update_query, json!({ "user_id": user_id }))
+            .await?;
         Ok(())
     }
 
     /// 减少关注数量
     pub async fn decrement_following_count(&self, user_id: &str) -> Result<()> {
         let update_query = "UPDATE user_profile SET following_count -= 1 WHERE user_id = $user_id AND following_count > 0";
-        self.db.query_with_params(update_query, json!({ "user_id": user_id })).await?;
+        self.db
+            .query_with_params(update_query, json!({ "user_id": user_id }))
+            .await?;
         Ok(())
     }
 
     /// 获取或创建用户资料（从Rainbow-Auth用户信息创建）
     pub async fn get_or_create_profile(
-        &self, 
-        user_id: &str, 
+        &self,
+        user_id: &str,
         email: &str,
         email_verified: bool,
-        username: Option<String>, 
-        display_name: Option<String>
+        username: Option<String>,
+        display_name: Option<String>,
     ) -> Result<UserProfile> {
         // 先尝试获取现有资料
         if let Some(mut profile) = self.get_profile_by_user_id(user_id).await? {
@@ -506,7 +669,8 @@ impl UserService {
         }
 
         // 如果不存在，创建新资料
-        self.create_profile_with_auth_info(user_id, email, email_verified, username, display_name).await
+        self.create_profile_with_auth_info(user_id, email, email_verified, username, display_name)
+            .await
     }
 
     /// 使用认证信息创建用户资料
@@ -518,8 +682,11 @@ impl UserService {
         username: Option<String>,
         display_name: Option<String>,
     ) -> Result<UserProfile> {
-        debug!("Creating new user profile for user: {} with email: {}", user_id, email);
-        
+        debug!(
+            "Creating new user profile for user: {} with email: {}",
+            user_id, email
+        );
+
         // 检查是否已有资料
         if let Some(existing) = self.get_profile_by_user_id(user_id).await? {
             return Ok(existing);
@@ -529,25 +696,27 @@ impl UserService {
         let mut base_username = if let Some(username) = username {
             username
         } else {
-            email.split('@').next()
+            email
+                .split('@')
+                .next()
                 .unwrap_or("user")
                 .chars()
                 .filter(|c| c.is_alphanumeric() || *c == '_' || *c == '-')
                 .collect::<String>()
                 .to_lowercase()
         };
-        
+
         // 确保用户名至少有3个字符
         if base_username.len() < 3 {
             base_username = format!("user_{}", base_username);
         }
-            
+
         let original_username = if base_username.is_empty() {
             format!("user{}", Uuid::new_v4().simple())
         } else {
             base_username
         };
-        
+
         // 生成唯一用户名
         let mut profile = UserProfile {
             id: Thing {
@@ -568,6 +737,8 @@ impl UserService {
             github_username: None,
             linkedin_url: None,
             facebook_url: None,
+            stripe_customer_id: None,
+            stripe_account_id: None,
             follower_count: 0,
             following_count: 0,
             article_count: 0,
@@ -577,10 +748,10 @@ impl UserService {
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };
-        
+
         // 确保用户名唯一
         profile.username = self.generate_unique_username(&profile.username).await?;
-        
+
         // 创建用户资料，使用 SurrealDB 的 time::now() 函数处理时间
         let create_query = format!(
             r#"
@@ -598,6 +769,8 @@ impl UserService {
                 github_username: {},
                 linkedin_url: {},
                 facebook_url: {},
+                stripe_customer_id: NULL,
+                stripe_account_id: NULL,
                 follower_count: {},
                 following_count: {},
                 article_count: {},
@@ -612,15 +785,51 @@ impl UserService {
             profile.user_id,
             profile.username,
             profile.display_name,
-            profile.bio.as_ref().map(|s| format!("\"{}\"", s)).unwrap_or("NULL".to_string()),
-            profile.avatar_url.as_ref().map(|s| format!("\"{}\"", s)).unwrap_or("NULL".to_string()),
-            profile.cover_image_url.as_ref().map(|s| format!("\"{}\"", s)).unwrap_or("NULL".to_string()),
-            profile.website.as_ref().map(|s| format!("\"{}\"", s)).unwrap_or("NULL".to_string()),
-            profile.location.as_ref().map(|s| format!("\"{}\"", s)).unwrap_or("NULL".to_string()),
-            profile.twitter_username.as_ref().map(|s| format!("\"{}\"", s)).unwrap_or("NULL".to_string()),
-            profile.github_username.as_ref().map(|s| format!("\"{}\"", s)).unwrap_or("NULL".to_string()),
-            profile.linkedin_url.as_ref().map(|s| format!("\"{}\"", s)).unwrap_or("NULL".to_string()),
-            profile.facebook_url.as_ref().map(|s| format!("\"{}\"", s)).unwrap_or("NULL".to_string()),
+            profile
+                .bio
+                .as_ref()
+                .map(|s| format!("\"{}\"", s))
+                .unwrap_or("NULL".to_string()),
+            profile
+                .avatar_url
+                .as_ref()
+                .map(|s| format!("\"{}\"", s))
+                .unwrap_or("NULL".to_string()),
+            profile
+                .cover_image_url
+                .as_ref()
+                .map(|s| format!("\"{}\"", s))
+                .unwrap_or("NULL".to_string()),
+            profile
+                .website
+                .as_ref()
+                .map(|s| format!("\"{}\"", s))
+                .unwrap_or("NULL".to_string()),
+            profile
+                .location
+                .as_ref()
+                .map(|s| format!("\"{}\"", s))
+                .unwrap_or("NULL".to_string()),
+            profile
+                .twitter_username
+                .as_ref()
+                .map(|s| format!("\"{}\"", s))
+                .unwrap_or("NULL".to_string()),
+            profile
+                .github_username
+                .as_ref()
+                .map(|s| format!("\"{}\"", s))
+                .unwrap_or("NULL".to_string()),
+            profile
+                .linkedin_url
+                .as_ref()
+                .map(|s| format!("\"{}\"", s))
+                .unwrap_or("NULL".to_string()),
+            profile
+                .facebook_url
+                .as_ref()
+                .map(|s| format!("\"{}\"", s))
+                .unwrap_or("NULL".to_string()),
             profile.follower_count,
             profile.following_count,
             profile.article_count,
@@ -628,46 +837,52 @@ impl UserService {
             profile.is_verified,
             profile.is_suspended,
         );
-        
+
         debug!("Creating user profile with query: {}", create_query);
-        
-        let mut response = self.db.query(&create_query).await
-            .map_err(|e| {
-                error!("Failed to create user profile record: {:?}", e);
-                AppError::Internal(format!("Failed to create user profile: {}", e))
-            })?;
-            
+
+        let mut response = self.db.query(&create_query).await.map_err(|e| {
+            error!("Failed to create user profile record: {:?}", e);
+            AppError::Internal(format!("Failed to create user profile: {}", e))
+        })?;
+
         let created: Vec<UserProfile> = response.take(0)?;
         if created.is_empty() {
             error!("No user profile was created for user: {}", user_id);
-            return Err(AppError::Internal("Failed to create user profile".to_string()));
+            return Err(AppError::Internal(
+                "Failed to create user profile".to_string(),
+            ));
         }
-        
+
         let result = created.into_iter().next().unwrap();
         debug!("Successfully created user profile with ID: {}", result.id);
         info!("Created user profile for user: {}", user_id);
-        
+
         // 从数据库重新获取创建的记录，确保数据已经持久化
         if let Some(created_profile) = self.get_profile_by_user_id(user_id).await? {
             Ok(created_profile)
         } else {
             error!("Failed to retrieve created profile for user: {}", user_id);
-            Err(AppError::Internal("Profile was created but could not be retrieved".to_string()))
+            Err(AppError::Internal(
+                "Profile was created but could not be retrieved".to_string(),
+            ))
         }
     }
 
     /// 获取热门用户
     pub async fn get_popular_users(&self, limit: usize) -> Result<Vec<UserProfile>> {
         debug!("Getting popular users with limit: {}", limit);
-        
+
         let query = r#"
             SELECT * FROM user_profile 
             WHERE is_suspended = false
             ORDER BY follower_count DESC, article_count DESC
             LIMIT $limit
         "#;
-        
-        let mut response = self.db.query_with_params(query, json!({ "limit": limit })).await?;
+
+        let mut response = self
+            .db
+            .query_with_params(query, json!({ "limit": limit }))
+            .await?;
         let profiles: Vec<UserProfile> = response.take(0)?;
         Ok(profiles)
     }
@@ -681,9 +896,11 @@ impl UserService {
         while self.username_exists(&username).await? {
             username = format!("{}{}", base_username, counter);
             counter += 1;
-            
+
             if counter > 1000 {
-                return Err(AppError::Internal("Failed to generate unique username".to_string()));
+                return Err(AppError::Internal(
+                    "Failed to generate unique username".to_string(),
+                ));
             }
         }
 
@@ -693,12 +910,19 @@ impl UserService {
     /// 检查用户名是否已存在
     async fn username_exists(&self, username: &str) -> Result<bool> {
         let query = "SELECT count() as count FROM user_profile WHERE username = $username";
-        let mut response = self.db.query_with_params(query, json!({
-            "username": username
-        })).await?;
-        
+        let mut response = self
+            .db
+            .query_with_params(
+                query,
+                json!({
+                    "username": username
+                }),
+            )
+            .await?;
+
         let result: Vec<serde_json::Value> = response.take(0)?;
-        let count = result.first()
+        let count = result
+            .first()
             .and_then(|v| v.get("count"))
             .and_then(|v| v.as_i64())
             .unwrap_or(0);

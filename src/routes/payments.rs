@@ -2,9 +2,8 @@ use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
     response::Json,
-    routing::{get, post, put},
-    Router,
-    Extension,
+    routing::{delete, get, post, put},
+    Extension, Router,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -14,6 +13,7 @@ use crate::{
     error::{AppError, Result},
     models::{
         payment::*,
+        stripe::{CreatePaymentMethodRequest, StripePaymentMethod},
     },
     services::auth::User,
     state::AppState,
@@ -24,19 +24,26 @@ pub fn router() -> Router<Arc<AppState>> {
         // 内容访问和预览
         .route("/content/:article_id/access", get(check_content_access))
         .route("/content/:article_id/preview", get(get_content_preview))
-        
         // 文章定价管理
         .route("/articles/:article_id/pricing", put(set_article_pricing))
         .route("/articles/:article_id/pricing", get(get_article_pricing))
-        
         // 单次购买
         .route("/articles/purchase", post(purchase_article))
         .route("/purchases/:purchase_id", get(get_purchase_details))
-        
         // 创作者仪表板和统计
         .route("/dashboard/:creator_id", get(get_payment_dashboard))
         .route("/access-log", post(record_content_access))
-        
+        // 支付方式管理
+        .route("/payment-methods", get(list_payment_methods))
+        .route("/payment-methods", post(add_payment_method))
+        .route(
+            "/payment-methods/:payment_method_id",
+            delete(remove_payment_method),
+        )
+        .route(
+            "/payment-methods/:payment_method_id/default",
+            post(set_default_payment_method),
+        )
         // 收益分析
         .route("/earnings", get(get_earnings_analysis))
         .route("/earnings/articles/:article_id", get(get_article_earnings))
@@ -51,7 +58,8 @@ async fn check_content_access(
     debug!("Checking content access for article: {}", article_id);
 
     let user_id = user.map(|Extension(u)| u.id);
-    let access = state.payment_service
+    let access = state
+        .payment_service
         .check_content_access(&article_id, user_id.as_deref())
         .await?;
 
@@ -70,7 +78,8 @@ async fn get_content_preview(
     debug!("Getting content preview for article: {}", article_id);
 
     let user_id = user.map(|Extension(u)| u.id);
-    let preview = state.payment_service
+    let preview = state
+        .payment_service
         .get_content_preview(&article_id, user_id.as_deref())
         .await?;
 
@@ -104,7 +113,8 @@ async fn set_article_pricing(
         paywall_message: payload.paywall_message,
     };
 
-    let pricing = state.payment_service
+    let pricing = state
+        .payment_service
         .set_article_pricing(&article_id, &user.id, request)
         .await?;
 
@@ -140,13 +150,13 @@ async fn get_article_pricing(
                 created_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
             };
-            
+
             Ok(Json(serde_json::json!({
                 "success": true,
                 "data": default_pricing
             })))
-        },
-        Err(e) => Err(e)
+        }
+        Err(e) => Err(e),
     }
 }
 
@@ -169,8 +179,11 @@ async fn purchase_article(
         payment_method_id: payload.payment_method_id,
     };
 
-    let purchase = state.payment_service
-        .purchase_article(&user.id, request)
+    let display_name = user.display_name.as_deref().or(user.username.as_deref());
+
+    let purchase = state
+        .payment_service
+        .purchase_article(&user.id, &user.email, display_name, request)
         .await?;
 
     Ok(Json(serde_json::json!({
@@ -210,10 +223,13 @@ async fn get_payment_dashboard(
 
     // 验证权限 - 只有创作者本人可以查看
     if user.id != creator_id {
-        return Err(AppError::Authorization("只能查看自己的收益数据".to_string()));
+        return Err(AppError::Authorization(
+            "只能查看自己的收益数据".to_string(),
+        ));
     }
 
-    let dashboard = state.payment_service
+    let dashboard = state
+        .payment_service
         .get_payment_dashboard(&creator_id)
         .await?;
 
@@ -247,7 +263,8 @@ async fn record_content_access(
         _ => AccessType::Preview,
     };
 
-    state.payment_service
+    state
+        .payment_service
         .record_content_access(
             &user.id,
             &payload.article_id,
@@ -259,6 +276,90 @@ async fn record_content_access(
     Ok(Json(serde_json::json!({
         "success": true,
         "data": null
+    })))
+}
+
+/// 获取当前用户的支付方式列表
+async fn list_payment_methods(
+    State(state): State<Arc<AppState>>,
+    Extension(user): Extension<User>,
+) -> Result<Json<serde_json::Value>> {
+    let methods = state.stripe_service.list_payment_methods(&user.id).await?;
+
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "data": methods,
+    })))
+}
+
+/// 添加新的支付方式
+async fn add_payment_method(
+    State(state): State<Arc<AppState>>,
+    Extension(user): Extension<User>,
+    Json(payload): Json<CreatePaymentMethodRequest>,
+) -> Result<Json<serde_json::Value>> {
+    let display_name = user
+        .display_name
+        .as_deref()
+        .or_else(|| user.username.as_deref());
+
+    let payment_method = state
+        .stripe_service
+        .add_payment_method(&user.id, &user.email, display_name, payload)
+        .await?;
+
+    let updated_methods = state.stripe_service.list_payment_methods(&user.id).await?;
+
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "data": payment_method,
+        "meta": {
+            "payment_methods": updated_methods
+        }
+    })))
+}
+
+/// 设置默认支付方式
+async fn set_default_payment_method(
+    State(state): State<Arc<AppState>>,
+    Extension(user): Extension<User>,
+    Path(payment_method_id): Path<String>,
+) -> Result<Json<serde_json::Value>> {
+    let payment_method = state
+        .stripe_service
+        .set_default_payment_method(&user.id, &payment_method_id)
+        .await?;
+
+    let updated_methods = state.stripe_service.list_payment_methods(&user.id).await?;
+
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "data": payment_method,
+        "meta": {
+            "payment_methods": updated_methods
+        }
+    })))
+}
+
+/// 删除支付方式
+async fn remove_payment_method(
+    State(state): State<Arc<AppState>>,
+    Extension(user): Extension<User>,
+    Path(payment_method_id): Path<String>,
+) -> Result<Json<serde_json::Value>> {
+    state
+        .stripe_service
+        .delete_payment_method(&user.id, &payment_method_id)
+        .await?;
+
+    let updated_methods = state.stripe_service.list_payment_methods(&user.id).await?;
+
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "data": serde_json::Value::Null,
+        "meta": {
+            "payment_methods": updated_methods
+        }
     })))
 }
 
@@ -282,7 +383,9 @@ async fn get_earnings_analysis(
     // 如果指定了creator_id，验证权限
     if let Some(creator_id) = &query.creator_id {
         if user.id != *creator_id {
-            return Err(AppError::Authorization("只能查看自己的收益数据".to_string()));
+            return Err(AppError::Authorization(
+                "只能查看自己的收益数据".to_string(),
+            ));
         }
     }
 
@@ -290,7 +393,8 @@ async fn get_earnings_analysis(
     let creator_id = query.creator_id.unwrap_or(user.id);
 
     // 获取收益仪表板（这里复用了dashboard功能）
-    let dashboard = state.payment_service
+    let dashboard = state
+        .payment_service
         .get_payment_dashboard(&creator_id)
         .await?;
 
@@ -320,12 +424,14 @@ async fn get_article_earnings(
     // 这里需要先获取文章信息验证作者
     // 简化实现，假设验证通过
 
-    let dashboard = state.payment_service
+    let dashboard = state
+        .payment_service
         .get_payment_dashboard(&user.id)
         .await?;
 
     // 从top_earning_articles中找到指定文章
-    let article_earnings = dashboard.top_earning_articles
+    let article_earnings = dashboard
+        .top_earning_articles
         .into_iter()
         .find(|article| article.article_id == article_id);
 
@@ -344,6 +450,6 @@ async fn get_article_earnings(
                 "view_count": 0,
                 "purchase_count": 0
             }
-        })))
+        }))),
     }
 }
